@@ -1,0 +1,33 @@
+git cloneStarting CAP Project Generator...
+Using @sap/cds-dk [9.9.1] from /extbin/globals/bun/global/install/node_modules/@sap/cds-dk
+Using @sap/generator-cap-project [2.0.6] from [/extbin/globals/bun/global/install/node_modules/@sap/generator-cap-project]
+Using root path [/home/user/projects]
+
+Creating project with mta, nodejs
+
+Adding facet: nodejs
+Adding facet: mta
+
+Successfully initialized CAP project
+Continue with: code cap-aprobacion-nomina 
+
+
+Installing dependencies...
+
+added 252 packages, and audited 253 packages in 4s
+
+39 packages are looking for funding
+  run `npm fund` for details
+
+1 moderate severity vulnerability
+
+To address all issues, run:
+  npm audit fix
+
+Run `npm audit` for details.
+
+Finished installing dependencies
+
+Done setting up project cap-aprobacion-nomina
+Project is ready to use
+
