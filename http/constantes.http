@@ -1,0 +1,11 @@
+@server=http://localhost:4004
+@path=/api/v1
+
+### GET Metadata
+GET {{server}}{{path}}/$metadata
+Authorization: Basic YWxpY2U6YWxpY2U=
+
+
+### GET Constantes
+GET {{server}}{{path}}/obtenerConstantes
+Authorization: Basic YWxpY2U6YWxpY2U=
