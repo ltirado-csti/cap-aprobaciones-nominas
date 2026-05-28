@@ -24,7 +24,7 @@
 //             necesita dispararlo manualmente.
 // ─────────────────────────────────────────────────────────────────
 
-@path: '/api/v1/utils'
+@path: '/nomina/utils'
 service UtilsService @(requires: 'authenticated-user') {
 
   // ── Tipos ─────────────────────────────────────────────────────

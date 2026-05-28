@@ -102,7 +102,7 @@ type AccionResult {
 
 // ── Servicio principal ─────────────────────────────────────────────
 
-@path: '/api/v1'
+@path: '/nomina/aprobaciones'
 service PagosService @(requires: 'authenticated-user') {
 
   // ── MASTER ────────────────────────────────────────────────────
