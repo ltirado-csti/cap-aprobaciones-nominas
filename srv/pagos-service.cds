@@ -1,24 +1,28 @@
 // ─────────────────────────────────────────────────────────────────
-// pagos-service.cds
+// srv/pagos-service.cds
 //
-// Definición del servicio CAP H2H Aprobaciones Nómina.
+// Servicio principal de aprobaciones H2H Nómina.
+//
+// Path: /nomina/aprobaciones
+//   nomina       → dominio de negocio (Payroll)
+//   aprobaciones → proceso central del servicio
+//
 // Sin persistencia propia (no hay HANA Cloud / Postgres).
-//
-// Arquitectura de datos verificada en código fuente:
-//   HANA XSOData  → PropuestaPago, Adjuntos, Aprobadores, Constantes
+// Arquitectura de datos:
+//   CPI           → PropuestaPago, Adjuntos, Aprobadores
 //   SAP Gateway   → Usuarios, Validaciones, Firmas, PDF, Correo
-//   CPI           → /apoReg (ZfiWsH2hApoReg), /Obs (ZfiWsH2hObs)
+//   CPI iFlows    → /apoReg (ZfiWsH2hApoReg), /Obs (ZfiWsH2hObs)
 //   BPA           → TaskCollection, completarTarea, readContext
 // ─────────────────────────────────────────────────────────────────
 
 // ── Tipos base (verificados en contexto.json y PPOData.js) ────────
 
 type PropuestaPago {
-  // Claves (clave compuesta HANA)
+  // Claves
   NroPP            : String(20);     // "R4603"
   Sociedad         : String(4);      // "0025"
   FechaPP          : String(10);     // "20-05-2026" (dd-MM-yyyy del contexto BPA)
-  // Datos de la propuesta
+  // Datos
   EstadoPP         : String(20);     // "PENDIENTE"|"VALIDACION"|"EN_FIRMA"|"FIRMADO"|...
   ViaPago          : String(1);      // "W"|"I"|"Z"|"C"|"N"
   ModalidadPP      : String(10);     // "H2H"|"CAR"
@@ -26,26 +30,24 @@ type PropuestaPago {
   Importe          : String(20);     // string porque viene del contexto BPA
   Moneda           : String(5);      // "PEN"
   Banco            : String(10);     // "BCP"
-  BancoDescripcion : String(100);    // "001 - BCP Soles"
-  UsrCreacionPP    : String(12);     // usuario SAP
-  UserCrea         : String(100);    // email
+  BancoDescripcion : String(100);
+  UsrCreacionPP    : String(12);
+  UserCrea         : String(100);
   UserModif        : String(100);
   FechaModif       : DateTime;
-  Analista         : String(12);     // usuario SAP del analista
+  Analista         : String(12);
   CorreoAnalista   : String(100);
   IndPAdelanto     : String(1);      // "X" | ""
   ExisteDoc        : String(10);     // "EXISTE" | ""
-  IdInstanciaWF    : String(50);     // InstanceID del BPA
+  IdInstanciaWF    : String(50);
   NroDocCompensacion: String(20);
   FechaCompensacion : String(10);
-  // FechaPPJS no va en el CDS (es un Date JS interno, no se serializa)
 }
 
 type CurrentUser {
   name : String;   // email del usuario autenticado (del getCurrentUserApi())
 }
 
-// Contexto BPA completo (campos del contexto.json verificado)
 type ContextoBPA {
   NroPP           : String(20);
   Sociedad        : String(4);
@@ -106,22 +108,17 @@ type AccionResult {
 service PagosService @(requires: 'authenticated-user') {
 
   // ── MASTER ────────────────────────────────────────────────────
-  // Solo desktop (onInit del Master.controller.js)
+  // onInit() del Master.controller.js
 
   @Common.Label: 'Obtener constantes de negocio'
   function obtenerConstantes() returns ConstantesRpta;
 
-  // ── DETAIL — LECTURA INICIAL ──────────────────────────────────
-  // Reemplaza: readContext() + getPropuestaPago() en _onBindingChange
-
-  type DetalleResult {
+  @Common.Label: 'Obtener detalle de propuesta y contexto BPA'
+  function obtenerDetalle(taskId: String) returns {
     pp         : PropuestaPago;
     contexto   : ContextoBPA;
     constantes : ConstantesRpta;
-  }
-
-  @Common.Label: 'Obtener detalle de propuesta y contexto BPA'
-  function obtenerDetalle(taskId: String) returns DetalleResult;
+  };
 
   // ── ANALISTA TESORERÍA ────────────────────────────────────────
 
