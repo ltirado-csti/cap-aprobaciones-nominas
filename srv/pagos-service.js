@@ -4,16 +4,20 @@
  *
  * Implementación del PagosService usando el patrón cds.ApplicationService.
  *
- * Cada grupo de acciones se encapsula en un método estático handle_*
- * El init() los descubre automáticamente por prefijo y los registra.
- *
- * Grupos definidos:
- *   handle_master()        → obtenerConstantes, obtenerDetalle
+ * Grupos de handlers registrados automáticamente por init():
+ *   handle_master()        → obtenerConstantes
+ *   handle_inbox()         → READ TareasInbox (List Report + Object Page)
+ *   handle_composiciones() → READ Proveedor, Adjunto, Aprobador
  *   handle_analistaT()     → enviarSupervisorOCaja, compensar, cerrarPorObservacion, eliminarDoc
- *   handle_supervisor()    → supervisorAprobar, supervisorTerminarFlujo, supervisorObservar
+ *   handle_supervisor()    → supervisorAprobar, supervisorTerminarFlujo, supervisorObservar, supervisorAnular
  *   handle_revisor()       → revisorAprobar, revisorObservar
- *   handle_apoderado()     → apoderadoFirmar, apoderadoObservar
+ *   handle_apoderado()     → apoderadoFirmar, apoderadoObservar, redirigirApoderado
  *   handle_caja()          → cajaConfirmarPago, cajaObservar
+ *
+ * DISEÑO — Un handler READ para dos pantallas:
+ *   Sin clave (req.params vacío)  → List Report: lista liviana desde BPA
+ *   Con clave (instanceID)        → Object Page: detalle completo con composiciones
+ *                                   y flags de visibilidad por rol (Bloque 3)
  */
 
 const cds      = require("@sap/cds");
@@ -22,10 +26,11 @@ const propSvc  = require("./domain/propuesta.service");
 const constSvc = require("./domain/constantes.service");
 const cpiInfra = require("./infrastructure/cpi-client");
 const bpa      = require("./infrastructure/bpa-client");
+const { Readable } = require("stream");
 
 const LOG = cds.log("PagosService");
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helper de error uniforme ─────────────────────────────────────────────────
 
 /**
  * Envuelve una llamada al domain service con manejo de error uniforme.
@@ -39,17 +44,14 @@ function _handle(req, fn) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SERVICIO
+// CLASE PRINCIPAL
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class PagosService extends cds.ApplicationService {
 
-  // ─── Bootstrap ─────────────────────────────────────────────────────────────
-
   /**
-   * init() descubre todos los métodos estáticos con prefijo "handle_"
-   * y los ejecuta en el contexto de esta instancia para registrar
-   * los listeners srv.on(...) de cada grupo.
+   * Descubre y registra todos los métodos estáticos con prefijo "handle_".
+   * Esto evita registrar cada handler manualmente en init().
    */
   init() {
     const handlers = Object.getOwnPropertyNames(PagosService)
@@ -59,19 +61,17 @@ class PagosService extends cds.ApplicationService {
       PagosService[handler].call(this);
     }
 
-    LOG.info(`PagosService iniciado | handlers registrados: ${handlers.join(", ")}`);
+    LOG.info(`PagosService iniciado | handlers: ${handlers.join(", ")}`);
     return super.init();
   }
 
-  // ─── MASTER ────────────────────────────────────────────────────────────────
-  // Acciones del Master.controller.js: constantes y lectura inicial del Detail
+  // ─── MASTER ───────────────────────────────────────────────────────────────
 
   static handle_master() {
     /**
-     * GET /api/v1/obtenerConstantes()
-     * Carga las constantes de negocio desde HANA XSOData /Constantes.
-     * Usado en onInit() del Master.controller.js (solo desktop).
-     * Resultado cacheado en memoria durante la vida del proceso CAP.
+     * GET /nomina/aprobaciones/obtenerConstantes()
+     * Carga constantes de negocio desde HANA XSOData /Constantes.
+     * Origen legado: onInit() del Master.controller.js
      */
     this.on("obtenerConstantes", async (_req) => {
       const { rpta } = await constSvc.getConstantes();
@@ -85,186 +85,591 @@ class PagosService extends cds.ApplicationService {
         sDocumentUrlTasa   : rpta.sDocumentUrlTasa,
       };
     });
+  }
 
+  // ─── PDF ──────────────────────────────────────────────────────────────────
+
+  static handle_pdf() {
     /**
-     * GET /api/v1/obtenerDetalle(taskId=...)
-     * Lectura inicial del Detail.controller.js al abrir una tarea del Inbox.
-     * Reemplaza: readContext(sTaskID) + getPropuestaPago() + getConstantes()
-     * en _onBindingChange() del Detail.controller.js original.
-     *
-     * Flujo:
-     *   1. Lee el contexto BPA (NroPP, Sociedad, flags, usuarios asignados...)
-     *   2. Lee o crea la PropuestaPago en HANA XSOData
-     *   3. Retorna pp + contexto + constantes en un solo round-trip
+     * GET /nomina/aprobaciones/PropuestaPDF('{id}')
+     * Sirve el PDF de la propuesta como stream binario.
+     * Sin parámetro "contenido" retorna metadatos; con él retorna el buffer.
+     * Origen legado: Detail.view.xml → tab PDF → getPropuestaPDFSAP()
      */
-    this.on("obtenerDetalle", async (req) => {
-      const { taskId } = req.data;
+    this.on("READ", "PropuestaPDF", async (req) => {
+      const id = req.params?.[0]?.id ?? req.params?.[0];
+      if (!id) return [];
 
-      const contexto = await bpa.readContext(taskId);
-      if (!contexto) return req.error(404, "No se pudo obtener el contexto de la tarea BPA");
+      const [numeroPropuesta, sociedad, ...fechaParts] = id.split("-");
+      const fechaPropuestaPago = fechaParts.join("-");
 
-      const pp = await propSvc.obtenerOCrearPropuesta(contexto, taskId);
-      if (!pp) return req.error(404, `Propuesta ${contexto.NroPP} no encontrada`);
+      const columns    = req.query?.SELECT?.columns ?? [];
+      const esContenido = columns.some(c => c?.ref?.[0] === "contenido");
 
-      const { rpta: constantes } = await constSvc.getConstantes();
-      return { pp, contexto, constantes };
+      if (esContenido) {
+        return Readable.from(_getMockPDFBuffer(id));
+      }
+
+      return {
+        id,
+        numeroPropuesta,
+        sociedad,
+        fechaPropuestaPago,
+        mimeType     : "application/pdf",
+        nombreArchivo: `${id}.pdf`,
+      };
     });
   }
 
-  // ─── ANALISTA TESORERÍA ────────────────────────────────────────────────────
-  // Acciones del AnalistaTesoreria.js: enviar, compensar, cerrar, eliminar
+  // ─── INBOX (List Report + Object Page) ───────────────────────────────────
+
+  static handle_inbox() {
+    /**
+     * GET /nomina/aprobaciones/TareasInbox
+     * Sin clave → List Report: lista liviana desde BPA sin composiciones.
+     * Con clave → Object Page: detalle completo con composiciones y flags de rol.
+     * Origen legado: Master.controller.js + Detail.controller.js → _onBindingChange
+     */
+    this.on("READ", "TareasInbox", async (req) => {
+      const instanceID = req.params?.[0]?.instanceID ?? req.params?.[0];
+
+      if (instanceID) {
+        return await _obtenerDetalleTarea(instanceID);
+      }
+
+      const tareas = (await _obtenerTareasBpa()).map(_mapearTareaInbox);
+      tareas.$count = tareas.length;
+      return tareas;
+    });
+  }
+
+  // ─── COMPOSICIONES ────────────────────────────────────────────────────────
+
+  static handle_composiciones() {
+    /**
+     * GET /nomina/aprobaciones/TareasInbox('{id}')/proveedores
+     * Retorna la lista de proveedores de la propuesta.
+     * Origen legado: fragment/Proveedores.xml
+     */
+    this.on("READ", "Proveedor", async (req) => {
+      const instanceID = _extraerInstanceID(req);
+      if (!instanceID) return [];
+      const oDetalle = await _obtenerDetalleTarea(instanceID);
+      return oDetalle.proveedores ?? [];
+    });
+
+    /**
+     * GET /nomina/aprobaciones/TareasInbox('{id}')/adjuntos
+     * Retorna la lista de adjuntos de la propuesta.
+     * Origen legado: fragment/Adjuntos2.xml
+     */
+    this.on("READ", "Adjunto", async (req) => {
+      const instanceID = _extraerInstanceID(req);
+      if (!instanceID) return [];
+      const oDetalle = await _obtenerDetalleTarea(instanceID);
+      return oDetalle.adjuntos ?? [];
+    });
+
+    /**
+     * GET /nomina/aprobaciones/TareasInbox('{id}')/aprobadores
+     * Retorna el historial de aprobaciones de la propuesta.
+     * Origen legado: fragment/Aprobadores.xml
+     */
+    this.on("READ", "Aprobador", async (req) => {
+      const instanceID = _extraerInstanceID(req);
+      if (!instanceID) return [];
+      const oDetalle = await _obtenerDetalleTarea(instanceID);
+      return oDetalle.aprobadores ?? [];
+    });
+  }
+
+  // ─── ANALISTA TESORERÍA — Origen: AnalistaTesoreria.js ───────────────────
 
   static handle_analistaT() {
     /**
-     * POST /api/v1/enviarSupervisorOCaja
-     * Enruta según ViaPago:
-     *   W → EN_CAJA     (asigna usuarios Caja)
-     *   I / Z → VALIDACION (asigna usuarios Supervisor)
-     * Valida adelanto (checkAdelanto + evaluarDocumentoAdjunto) antes de enrutar.
+     * POST /nomina/aprobaciones/enviarSupervisorOCaja
+     * Enruta según viaPago: W → EN_CAJA, resto → VALIDACION
      */
     this.on("enviarSupervisorOCaja", (req) =>
       _handle(req, () => aprobSvc.enviarSupervisorOCaja(req.data))
     );
 
     /**
-     * POST /api/v1/compensar
-     * Obtiene el documento de compensación desde CPI (/compensacion/consultar)
-     * y actualiza NroDocCompensacion + FechaCompensacion en HANA.
+     * POST /nomina/aprobaciones/compensar
+     * Obtiene documento de compensación desde CPI y actualiza la propuesta.
      */
-    this.on("compensar", async (req) => {
-      return _handle(req, async () => {
-        const oDocCompensa = await cpiInfra.consultarCompensacion(req.data.pp);
+    this.on("compensar", async (req) =>
+      _handle(req, async () => {
+        const oDocCompensa = await cpiInfra.consultarCompensacion(req.data.propuesta);
         if (!oDocCompensa) throw Object.assign(
           new Error("No se pudo obtener el documento de compensación desde SAP"),
           { status: 500 }
         );
         return aprobSvc.compensar({ ...req.data, oDocCompensa });
-      });
-    });
+      })
+    );
 
     /**
-     * POST /api/v1/cerrarPorObservacion
-     * Cierra la propuesta observada por el Supervisor (OBS_SUPER → CERRADO_OB).
+     * POST /nomina/aprobaciones/cerrarPorObservacion
+     * OBS_SUPER → CERRADO_OB
      */
     this.on("cerrarPorObservacion", (req) =>
       _handle(req, () => aprobSvc.cerrarPorObservacion(req.data))
     );
 
     /**
-     * POST /api/v1/eliminarDoc
-     * Elimina el documento generado (GENERADO → ELIMINADO).
+     * POST /nomina/aprobaciones/eliminarDoc
+     * GENERADO → ELIMINADO
      */
     this.on("eliminarDoc", (req) =>
       _handle(req, () => aprobSvc.eliminarDoc(req.data))
     );
   }
 
-  // ─── SUPERVISOR ────────────────────────────────────────────────────────────
-  // Acciones del Supervisor.js: aprobar, terminar flujo, observar
+  // ─── SUPERVISOR — Origen: Supervisor.js ──────────────────────────────────
 
   static handle_supervisor() {
     /**
-     * POST /api/v1/supervisorAprobar
-     * Enrutamiento según ModalidadPP, NroPP, ViaPago y aSociedadesRevision:
-     *   H2H + sociedad con revisión + no CAR + no via C → Revisor
-     *   H2H resto → Apoderado
-     *   CAR + checkPerfilSAP(TR) → Revisor o Apoderado
-     *   ViaPago Z o I → AnalistaTesorería (APROBADO)
+     * POST /nomina/aprobaciones/supervisorAprobar
+     * Enruta según modalidadPP, viaPago y sociedades de revisión.
      */
     this.on("supervisorAprobar", (req) =>
       _handle(req, () => aprobSvc.supervisorAprobar(req.data))
     );
 
     /**
-     * POST /api/v1/supervisorTerminarFlujo
-     * Cancela la instancia BPA completa (cerrarFlujo).
-     * Bloqueado para vías de pago C, I, W, Z (aValidarViaPago).
+     * POST /nomina/aprobaciones/supervisorTerminarFlujo
+     * Cancela la instancia BPA completa. Solo disponible cuando puedeTerminarFlujo = true.
      */
     this.on("supervisorTerminarFlujo", (req) =>
       _handle(req, () => aprobSvc.supervisorTerminarFlujo(req.data))
     );
 
     /**
-     * POST /api/v1/supervisorObservar
-     * VALIDACION → OBS_SUPER.
-     * Registra observación en SAP vía CPI (/Obs → ZfiWsH2hObs PiEstado=OBTR).
+     * POST /nomina/aprobaciones/supervisorObservar
+     * VALIDACION → OBS_SUPER (CPI: ZfiWsH2hObs, PiEstado=OBTR)
      */
     this.on("supervisorObservar", (req) =>
       _handle(req, () => aprobSvc.supervisorObservar(req.data))
     );
+
+    /**
+     * POST /nomina/aprobaciones/supervisorAnular
+     * Anula la propuesta. Solo disponible cuando puedeAnular = true.
+     */
+    this.on("supervisorAnular", (req) =>
+      _handle(req, () => aprobSvc.supervisorAnular(req.data))
+    );
   }
 
-  // ─── REVISOR ───────────────────────────────────────────────────────────────
-  // Acciones del Revisor.js: aprobar, observar
+  // ─── REVISOR — Origen: Revisor.js ────────────────────────────────────────
 
   static handle_revisor() {
     /**
-     * POST /api/v1/revisorAprobar
-     * Guarda confirmación en HANA + envía al Apoderado con ApoReg F1 inicial.
-     * REVISION → EN_FIRMA.
+     * POST /nomina/aprobaciones/revisorAprobar
+     * REVISION → EN_FIRMA
      */
     this.on("revisorAprobar", (req) =>
       _handle(req, () => aprobSvc.revisorAprobar(req.data))
     );
 
     /**
-     * POST /api/v1/revisorObservar
-     * REVISION → OBS_REVISOR.
-     * Registra observación vía CPI (ZfiWsH2hObs PiEstado=OBRA).
+     * POST /nomina/aprobaciones/revisorObservar
+     * REVISION → OBS_REVISOR (CPI: ZfiWsH2hObs, PiEstado=OBRA)
      */
     this.on("revisorObservar", (req) =>
       _handle(req, () => aprobSvc.revisorObservar(req.data))
     );
   }
 
-  // ─── APODERADO ─────────────────────────────────────────────────────────────
-  // Acciones del Apoderado.js: firmar (F1/F2), observar
+  // ─── APODERADO — Origen: Apoderado.js ────────────────────────────────────
 
   static handle_apoderado() {
     /**
-     * POST /api/v1/apoderadoFirmar
-     * Lógica crítica de firma F1/F2:
-     *   1. obtenerUsuariosSAP(APODERADO) → obtiene sUserSAP del firmante actual
-     *   2. contarFirmasSAP(pp) → determina si es primera (F1) o segunda firma (F2)
-     *   3. buildApoRegPayload → construye ZfiWsH2hApoReg
-     *   4. registrarAprobacionSAP → llama CPI /apoReg ANTES de completar BPA
-     *   5. F1: sigue EN_FIRMA | F2: FIRMADO
+     * POST /nomina/aprobaciones/apoderadoFirmar
+     * Lógica F1/F2: contadorFirma determina si es primera o segunda firma.
+     * registrarAprobacionSAP (CPI /apoReg) se llama antes de completar BPA.
      */
     this.on("apoderadoFirmar", (req) =>
       _handle(req, () => aprobSvc.apoderadoFirmar(req.data))
     );
 
     /**
-     * POST /api/v1/apoderadoObservar
-     * EN_FIRMA → OBS_APODER.
-     * Registra observación vía CPI (ZfiWsH2hObs PiEstado=OBAP).
+     * POST /nomina/aprobaciones/apoderadoObservar
+     * EN_FIRMA → OBS_APODER (CPI: ZfiWsH2hObs, PiEstado=OBAP)
      */
     this.on("apoderadoObservar", (req) =>
       _handle(req, () => aprobSvc.apoderadoObservar(req.data))
     );
+
+    /**
+     * POST /nomina/aprobaciones/redirigirApoderado
+     * Redirige la firma a otro apoderado. El comentario contiene el email destino.
+     */
+    this.on("redirigirApoderado", (req) =>
+      _handle(req, () => aprobSvc.redirigirApoderado(req.data))
+    );
   }
 
-  // ─── CAJA ──────────────────────────────────────────────────────────────────
-  // Acciones del Caja.js: confirmar pago, observar
+  // ─── CAJA — Origen: Caja.js ──────────────────────────────────────────────
 
   static handle_caja() {
     /**
-     * POST /api/v1/cajaConfirmarPago
-     * EN_CAJA → PAGADO. Completa el flujo BPA con bTerminar=true.
+     * POST /nomina/aprobaciones/cajaConfirmarPago
+     * EN_CAJA → PAGADO. Cierra el flujo BPA.
      */
     this.on("cajaConfirmarPago", (req) =>
       _handle(req, () => aprobSvc.cajaConfirmarPago(req.data))
     );
 
     /**
-     * POST /api/v1/cajaObservar
-     * EN_CAJA → OBS_CAJA.
-     * Registra observación vía CPI (ZfiWsH2hObs PiEstado=OBCA).
+     * POST /nomina/aprobaciones/cajaObservar
+     * EN_CAJA → OBS_CAJA (CPI: ZfiWsH2hObs, PiEstado=OBCA)
      */
     this.on("cajaObservar", (req) =>
       _handle(req, () => aprobSvc.cajaObservar(req.data))
     );
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FUNCIONES PRIVADAS
+// Ubicación: después del cierre de la clase, antes de module.exports.
+// Tienen acceso a bpa, propSvc, constSvc, cpiInfra, LOG (require del módulo).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Obtiene la lista de tareas pendientes desde SAP BPA.
+ * En modo híbrido conecta a BPA_WORKFLOW; en local retorna mock.
+ * Origen legado: Master.controller.js → getInboxTasks() → WorkFlow.js
+ *
+ * @returns {Promise<Array>} Lista de tareas BPA sin transformar
+ */
+async function _obtenerTareasBpa() {
+  try {
+    const tareas = await bpa.getInboxTasks();
+    return tareas ?? [];
+  } catch (oError) {
+    LOG.warn(`[_obtenerTareasBpa] BPA no disponible — usando mock | ${oError.message}`);
+    return _getMockTareas();
+  }
+}
+
+/**
+ * Transforma una tarea BPA raw al shape liviano de TareasInbox para el List Report.
+ * Los flags de rol se inicializan en false — se calculan al abrir el detalle.
+ * Origen legado: Master.controller.js → _onDataReceived() + formatter.js
+ *
+ * @param {object} oTarea - Tarea raw devuelta por BPA con contexto embebido
+ * @returns {object} Registro TareasInbox sin composiciones
+ */
+function _mapearTareaInbox(oTarea) {
+  const ctx = oTarea.context ?? oTarea;
+  return {
+    instanceID          : oTarea.instanceID ?? oTarea.id,
+    tituloTarea         : ctx.tituloTarea  ?? oTarea.subject,
+    numeroPropuesta     : ctx.numeroPropuesta,
+    sociedad            : ctx.sociedad,
+    banco               : ctx.banco,
+    bancoDescripcion    : ctx.bancoDescripcion,
+    importe             : ctx.importe,
+    moneda              : ctx.moneda,
+    viaPago             : ctx.viaPago,
+    modalidadPP         : ctx.modalidadPP,
+    version             : ctx.version,
+    fechaPropuestaPago  : ctx.fechaPropuestaPago,
+    usuarioCreacion     : ctx.usuarioCreacion,
+    // Flags de rol — false en el List Report, se calculan en _ensamblarDetalle
+
+    // Flags de rol — se leen del contexto BPA directamente
+    // En producción BPA los devuelve; en mock se toman del contexto embebido
+    tieneAnalista      : ctx.tieneAnalista      ?? false,
+    estaConforme       : ctx.estaConforme       ?? false,
+    tieneRevisor       : ctx.tieneRevisor       ?? false,
+    estaAprobado       : ctx.estaAprobado       ?? false,
+    esCaja             : ctx.esCaja             ?? false,
+    estaTerminado      : ctx.estaTerminado      ?? false,
+    estaAnulado        : ctx.estaAnulado        ?? false,
+    puedeTerminarFlujo : (ctx.estaConforme ?? false) && (ctx.estaTerminado ?? false),
+    puedeAnular        : (ctx.estaConforme ?? false) && (ctx.estaAnulado   ?? false),
+  };
+}
+
+/**
+ * Obtiene el detalle completo de una tarea para la Object Page.
+ * Llama a BPA y composiciones en paralelo para minimizar latencia.
+ * Origen legado: Detail.controller.js → _onBindingChange()
+ *
+ * @param {string} instanceID - ID de la tarea BPA
+ * @returns {Promise<object>} Registro completo con shape de TareasInbox
+ */
+async function _obtenerDetalleTarea(instanceID) {
+  try {
+    const [contexto, proveedores, adjuntos, aprobadores] = await Promise.all([
+      bpa.readContext(instanceID),
+      propSvc.obtenerProveedores(instanceID).catch(() => []),
+      propSvc.obtenerAdjuntos(instanceID).catch(() => []),
+      propSvc.obtenerAprobadores(instanceID).catch(() => []),
+    ]);
+
+    if (!contexto) {
+      throw Object.assign(
+        new Error(`Contexto BPA no encontrado para la tarea ${instanceID}`),
+        { status: 404 }
+      );
+    }
+
+    const propuesta = contexto.propuesta ?? contexto;
+    return _ensamblarDetalle({ instanceID, propuesta, proveedores, adjuntos, aprobadores });
+
+  } catch (oError) {
+    if (oError.status === 404) throw oError;
+    LOG.warn(`[_obtenerDetalleTarea] BPA no disponible — usando mock | ${oError.message}`);
+    return _getMockDetalle(instanceID);
+  }
+}
+
+/**
+ * Ensambla el objeto final TareasInbox con campos, composiciones y flags de rol.
+ *
+ * Bloque 3 — campos calculados para visibilidad doble del Supervisor (Tarea 3.2):
+ *   puedeTerminarFlujo = estaConforme AND estaTerminado
+ *   puedeAnular        = estaConforme AND estaAnulado
+ * Fiori Elements no soporta expresiones AND en @Core.OperationAvailable —
+ * se pre-calculan aquí como booleanos independientes en TareasInbox.
+ *
+ * @param {object} params - { instanceID, propuesta, proveedores, adjuntos, aprobadores }
+ * @returns {object} Registro TareasInbox listo para la Object Page
+ */
+function _ensamblarDetalle({ instanceID, propuesta, proveedores, adjuntos, aprobadores }) {
+  // Campos base — nombres exactos de PropuestaNomina.json
+  const base = {
+    instanceID            : instanceID,
+    tituloTarea           : propuesta.tituloTarea,
+    numeroPropuesta       : propuesta.numeroPropuesta,
+    sociedad              : propuesta.sociedad,
+    banco                 : propuesta.banco,
+    bancoDescripcion      : propuesta.bancoDescripcion,
+    importe               : propuesta.importe,
+    moneda                : propuesta.moneda,
+    viaPago               : propuesta.viaPago,
+    modalidadPP           : propuesta.modalidadPP,
+    version               : propuesta.version,
+    fechaPropuestaPago    : propuesta.fechaPropuestaPago,
+    usuarioCreacion       : propuesta.usuarioCreacion,
+    usuarioCreacionPP     : propuesta.usuarioCreacionPP,
+    analista              : propuesta.analista,
+    correoAnalista        : propuesta.correoAnalista,
+    existeDocumento       : propuesta.existeDocumento,
+    indicadorPagoAdelanto : propuesta.indicadorPagoAdelanto,
+    contadorFirma         : propuesta.contadorFirma,
+    usuarioApoderado      : propuesta.usuarioApoderado,
+    usuarioCaja           : propuesta.usuarioCaja,
+    usuariosRevisores     : propuesta.usuariosRevisores,
+    usuariosAnalistas     : propuesta.usuariosAnalistas,
+    usuariosSupervisores  : propuesta.usuariosSupervisores,
+  };
+
+  // Flags de visibilidad por rol (Tareas 3.1 a 3.5)
+  // Nombres exactos de PropuestaNomina.json — sin prefijo "b" del legado
+  const flagsRol = {
+    tieneAnalista : propuesta.tieneAnalista ?? false,
+    estaConforme  : propuesta.estaConforme  ?? false,
+    tieneRevisor  : propuesta.tieneRevisor  ?? false,
+    estaAprobado  : propuesta.estaAprobado  ?? false,
+    esCaja        : propuesta.esCaja        ?? false,
+    estaTerminado : propuesta.estaTerminado ?? false,
+    estaAnulado   : propuesta.estaAnulado   ?? false,
+  };
+
+  // Campos calculados para visibilidad doble del Supervisor (Tarea 3.2)
+  const flagsCalculados = {
+    puedeTerminarFlujo : flagsRol.estaConforme && flagsRol.estaTerminado,
+    puedeAnular        : flagsRol.estaConforme && flagsRol.estaAnulado,
+  };
+
+  return {
+    ...base,
+    ...flagsRol,
+    ...flagsCalculados,
+    proveedores,
+    adjuntos,
+    aprobadores,
+  };
+}
+
+/**
+ * Extrae el instanceID del padre desde el path de una solicitud de composición.
+ * El path de CAP viene como: TareasInbox(instanceID='...')/proveedores
+ * Origen legado: ninguno — patrón nuevo de CAP para entidades virtuales.
+ *
+ * @param {object} req - Request CAP de una composición
+ * @returns {string|null} instanceID de la tarea padre
+ */
+function _extraerInstanceID(req) {
+  const aParams = req.params ?? [];
+
+  // Caso 1: params[0] es objeto con propiedad instanceID (navegación OData)
+  if (aParams[0]?.instanceID) return aParams[0].instanceID;
+
+  // Caso 2: params[0] es string directo
+  if (typeof aParams[0] === "string") return aParams[0];
+
+  // Caso 3: viene como filtro en el query (Fiori Elements en algunos escenarios)
+  const sFromQuery = req.query?.SELECT?.from?.ref?.[0]?.where?.find?.(
+    w => w?.ref?.[0] === "instanceID"
+  )?.val;
+
+  return sFromQuery ?? null;
+}
+
+/**
+ * Parsea "dd-MM-yyyy" (formato del contexto BPA) a objeto Date JavaScript.
+ * Necesaria para claves datetime de SAP Gateway: Laufd=datetime'yyyy-MM-ddT...'
+ *
+ * @param {string} sFecha - Fecha en formato "dd-MM-yyyy" (ej: "20-05-2026")
+ * @returns {Date} Objeto Date en hora cero UTC
+ */
+function _parseFechaPP(sFecha) {
+  if (!sFecha) return new Date();
+  const [dd, mm, yyyy] = sFecha.split("-");
+  return new Date(`${yyyy}-${mm}-${dd}T00:00:00.000Z`);
+}
+
+/**
+ * Mock de lista de tareas para el List Report cuando BPA no está disponible.
+ * Activo en modo local (cds watch sin --profile hybrid).
+ *
+ * @returns {Array} 3 tareas representando los casos típicos del negocio
+ */
+function _getMockTareas() {
+  return [
+    {
+      instanceID: "mock-task-001",
+      context: {
+        tituloTarea: "0025-R4603-BCP-20/05/2026-R", numeroPropuesta: "R4603",
+        sociedad: "0025", fechaPropuestaPago: "20-05-2026", banco: "BCP",
+        bancoDescripcion: "001 - BCP Soles", viaPago: "N", modalidadPP: "H2H",
+        version: "0001", importe: "43038.69", moneda: "PEN",
+        usuarioCreacion: "cpanduro@centria.net",
+        tieneAnalista: false,
+        estaConforme : false,
+        tieneRevisor : true,   // ← simula rol Revisor
+        estaAprobado : false,
+        esCaja       : false,
+        estaTerminado: false,
+        estaAnulado  : false,
+      }
+    },
+    {
+      instanceID: "mock-task-002",
+      context: {
+        tituloTarea: "0025-R4610-SCO-21/05/2026-I", numeroPropuesta: "R4610",
+        sociedad: "0025", fechaPropuestaPago: "21-05-2026", banco: "SCOTIABANK",
+        bancoDescripcion: "009 - Scotiabank Soles", viaPago: "I", modalidadPP: "H2H",
+        version: "0001", importe: "15200.00", moneda: "PEN",
+        usuarioCreacion: "arodas@centria.net",
+      }
+    },
+    {
+      instanceID: "mock-task-003",
+      context: {
+        tituloTarea: "0025-R4615-BCP-22/05/2026-W", numeroPropuesta: "R4615",
+        sociedad: "0025", fechaPropuestaPago: "22-05-2026", banco: "BCP",
+        bancoDescripcion: "001 - BCP Soles", viaPago: "W", modalidadPP: "H2H",
+        version: "0001", importe: "8500.00", moneda: "PEN",
+        usuarioCreacion: "arodas@centria.net",
+      }
+    },
+  ];
+}
+
+/**
+ * Mock de detalle completo para la Object Page cuando BPA no está disponible.
+ * Basado en PropuestaNomina.json real del proyecto.
+ *
+ * @param {string} instanceID - ID de la instancia solicitada
+ * @returns {object} TareasInbox mock con composiciones y flags
+ */
+function _getMockDetalle(instanceID) {
+  return {
+    instanceID,
+    tituloTarea           : "0025-R4603-BCP-20/05/2026-R",
+    numeroPropuesta       : "R4603",
+    sociedad              : "0025",
+    fechaPropuestaPago    : "20-05-2026",
+    banco                 : "BCP",
+    bancoDescripcion      : "001 - BCP Soles",
+    viaPago               : "N",
+    modalidadPP           : "H2H",
+    version               : "0001",
+    importe               : "43038.69",
+    moneda                : "PEN",
+    analista              : "MRICANQUI",
+    correoAnalista        : "mricanqui@centria.net",
+    existeDocumento       : "EXISTE",
+    indicadorPagoAdelanto : "",
+    contadorFirma         : 0,
+    usuarioCreacion       : "cpanduro@centria.net",
+    usuarioCreacionPP     : "MRICANQUI",
+    usuarioApoderado      : "",
+    usuarioCaja           : "",
+    usuariosRevisores     : ["mminchan@urbanova.com.pe", "evillalobos@urbanova.com.pe"],
+    usuariosAnalistas     : ["mricanqui@centria.net", "arodas@centria.net"],
+    usuariosSupervisores  : ["cpanduro@centria.net", "ypocco@centria.net"],
+    // Flags de rol — ajustar para simular distintos roles durante desarrollo
+    tieneAnalista         : false,
+    estaConforme          : false,
+    tieneRevisor          : true,
+    estaAprobado          : false,
+    esCaja                : false,
+    estaTerminado         : false,
+    estaAnulado           : false,
+    puedeTerminarFlujo    : false,
+    puedeAnular           : false,
+    // Composiciones mock
+    proveedores: [
+      { proveedorId: "001", ruc: "20100070970", nombre: "EMPRESA DE SERVICIOS SAC",
+        glosa: "REMUNERACIONES MAYO 2026", monto: 15200.50, facturas: "F001-00123" },
+      { proveedorId: "002", ruc: "20512528458", nombre: "CONSORCIO INDUSTRIAL SA",
+        glosa: "HONORARIOS MAYO 2026",    monto: 27838.19, facturas: "F002-00987" },
+    ],
+    adjuntos: [
+      { adjuntoId: "adj-001", nombre: "CARGA_BANK_R4603_BCP.txt",
+        tipoAdjunto: "CARGA_BANK",  activo: true, docServiceObjectID: "dms-obj-001" },
+      { adjuntoId: "adj-002", nombre: "PAGO_TRANS_R4603_BCP.pdf",
+        tipoAdjunto: "PAGO_TRANS", activo: true, docServiceObjectID: "dms-obj-002" },
+    ],
+    aprobadores: [
+      { aprobadorId: "001", usuario: "CPANDURO", rol: "SUPERVISOR",
+        fechaAprob: new Date("2026-05-20T10:30:00Z"), aprobado: true,  observacion: "" },
+      { aprobadorId: "002", usuario: "MMINCHAN", rol: "REVISOR",
+        fechaAprob: null, aprobado: false, observacion: "Pendiente de revisión" },
+    ],
+  };
+}
+
+/**
+ * Genera un buffer PDF mínimo válido para verificación local.
+ * Permite verificar el streaming de CAP sin necesidad de SAP Gateway.
+ *
+ * @param {string} id - ID compuesto (ej: "R4603-0025-20-05-2026")
+ * @returns {Buffer} Buffer con PDF mínimo válido
+ */
+function _getMockPDFBuffer(id) {
+  const content = [
+    "%PDF-1.4",
+    "1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj",
+    "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj",
+    "3 0 obj<</Type/Page/MediaBox[0 0 595 842]/Parent 2 0 R/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj",
+    `4 0 obj<</Length 44>>\nstream\nBT /F1 12 Tf 100 700 Td (${id}) Tj ET\nendstream\nendobj`,
+    "5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj",
+    "xref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n",
+    "trailer<</Size 6/Root 1 0 R>>",
+    "startxref\n441",
+    "%%EOF",
+  ].join("\n");
+  return Buffer.from(content, "latin1");
 }
 
 module.exports = { PagosService };

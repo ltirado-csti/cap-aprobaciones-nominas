@@ -2,99 +2,81 @@
 // srv/pagos-service.cds
 //
 // Servicio principal de aprobaciones H2H Nómina.
-//
 // Path: /nomina/aprobaciones
-//   nomina       → dominio de negocio (Payroll)
-//   aprobaciones → proceso central del servicio
 //
-// Sin persistencia propia (no hay HANA Cloud / Postgres).
-// Arquitectura de datos:
-//   CPI           → PropuestaPago, Adjuntos, Aprobadores
-//   SAP Gateway   → Usuarios, Validaciones, Firmas, PDF, Correo
-//   CPI iFlows    → /apoReg (ZfiWsH2hApoReg), /Obs (ZfiWsH2hObs)
-//   BPA           → TaskCollection, completarTarea, readContext
+// Sin persistencia propia (sin HANA Cloud).
+// Fuentes de datos en runtime:
+//   BPA  → TareasInbox, contexto del flujo (PropuestaNomina.json)
+//   CPI  → Proveedores, validaciones, firmas, correo
+//   HANA → Adjuntos, Aprobadores (via CPI como fachada)
+//
+// DECISIÓN DE DISEÑO — Object Page sobre TareasInbox:
+//   La Object Page se monta directamente sobre TareasInbox.
+//   Las composiciones viven en TareasInbox y se cargan solo
+//   en el READ por instanceID (clave específica).
+//   Evita el problema de resolución de asociaciones entre
+//   entidades virtuales (@cds.persistence.skip).
+//
+// CONVENCIÓN DE NOMBRES (Opción A):
+//   Nombres exactos del objeto PropuestaNomina.json del BPA.
 // ─────────────────────────────────────────────────────────────────
 
-// ── Tipos base (verificados en contexto.json y PPOData.js) ────────
-
-type PropuestaPago {
-  // Claves
-  NroPP            : String(20);     // "R4603"
-  Sociedad         : String(4);      // "0025"
-  FechaPP          : String(10);     // "20-05-2026" (dd-MM-yyyy del contexto BPA)
-  // Datos
-  EstadoPP         : String(20);     // "PENDIENTE"|"VALIDACION"|"EN_FIRMA"|"FIRMADO"|...
-  ViaPago          : String(1);      // "W"|"I"|"Z"|"C"|"N"
-  ModalidadPP      : String(10);     // "H2H"|"CAR"
-  Version          : String(4);      // "0001"
-  Importe          : String(20);     // string porque viene del contexto BPA
-  Moneda           : String(5);      // "PEN"
-  Banco            : String(10);     // "BCP"
-  BancoDescripcion : String(100);
-  UsrCreacionPP    : String(12);
-  UserCrea         : String(100);
-  UserModif        : String(100);
-  FechaModif       : DateTime;
-  Analista         : String(12);
-  CorreoAnalista   : String(100);
-  IndPAdelanto     : String(1);      // "X" | ""
-  ExisteDoc        : String(10);     // "EXISTE" | ""
-  IdInstanciaWF    : String(50);
-  NroDocCompensacion: String(20);
-  FechaCompensacion : String(10);
+// ── Tipo de entrada para acciones por rol ─────────────────────────
+// Objeto PropuestaNomina que circula en el flujo BPA.
+type PropuestaNomina {
+  numeroPropuesta       : String(20);
+  sociedad              : String(4);
+  fechaPropuestaPago    : String(10);
+  banco                 : String(10);
+  bancoDescripcion      : String(100);
+  viaPago               : String(1);
+  modalidadPP           : String(10);
+  version               : String(4);
+  importe               : String(20);
+  moneda                : String(5);
+  estadoPP              : String(20);
+  analista              : String(12);
+  correoAnalista        : String(100);
+  usuarioCreacion       : String(100);
+  usuarioCreacionPP     : String(12);
+  tituloTarea           : String(100);
+  existeDocumento       : String(10);
+  indicadorPagoAdelanto : String(1);
+  idInstanciaWF         : String(50);
+  nroDocCompensacion    : String(20);
+  fechaCompensacion     : String(10);
+  tieneAnalista         : Boolean;
+  estaConforme          : Boolean;
+  tieneRevisor          : Boolean;
+  estaAprobado          : Boolean;
+  esCaja                : Boolean;
+  estaTerminado         : Boolean;
+  estaAnulado           : Boolean;
+  usuariosRevisores     : array of String;
+  usuariosSupervisores  : array of String;
+  usuariosAnalistas     : array of String;
+  usuarioApoderado      : String(100);
+  usuarioCaja           : String(100);
+  contadorFirma         : Integer;
 }
 
-type CurrentUser {
-  name : String;   // email del usuario autenticado (del getCurrentUserApi())
+// ── Tipo usuario autenticado ──────────────────────────────────────
+type UsuarioActual {
+  nombre : String;
 }
 
-type ContextoBPA {
-  NroPP           : String(20);
-  Sociedad        : String(4);
-  FechaPP         : String(10);
-  TaskTitle       : String(100);
-  Importe         : String(20);
-  Moneda          : String(5);
-  ModalidadPP     : String(10);
-  ViaPago         : String(1);
-  Banco           : String(10);
-  BancoDescripcion: String(100);
-  Version         : String(4);
-  Analista        : String(12);
-  CorreoAnalista  : String(100);
-  UserCrea        : String(100);
-  UsrCreacionPP   : String(12);
-  ExisteDoc       : String(10);
-  IndPAdelanto    : String(1);
-  // Flags de visibilidad de botones UI5
-  bRevisor        : Boolean;
-  bCaja           : Boolean;
-  bAprobado       : Boolean;
-  bConforme       : Boolean;
-  bConformeTermina: Boolean;
-  bTerminar       : Boolean;
-  bAnalista       : Boolean;
-  bAnulado        : Boolean;
-  // Usuarios asignados (CSV)
-  usrRevisor      : String(500);
-  usrApoderado    : String(500);
-  usrSupervisor   : String(500);
-  usrCaja         : String(500);
-  usrAnalista     : String(500);
-  // Contador firmas apoderado
-  iContadorFirma  : Integer;
-}
-
+// ── Tipo constantes de negocio ────────────────────────────────────
 type ConstantesRpta {
   aSociedadesRevision : array of String;
   aValidarViaPago     : array of String;
   aAprobarViaPago     : array of String;
   aSociedadesTermina  : array of String;
-  oTesoreros          : LargeString;   // JSON map { "sociedad": "email" }
+  oTesoreros          : LargeString;
   sDocumentUrl        : String;
   sDocumentUrlTasa    : String;
 }
 
+// ── Tipo resultado de acción ──────────────────────────────────────
 type AccionResult {
   success  : Boolean;
   mensaje  : String;
@@ -102,144 +84,315 @@ type AccionResult {
   taskId   : String;
 }
 
-// ── Servicio principal ─────────────────────────────────────────────
+// ── Servicio principal ────────────────────────────────────────────
 
 @path: '/nomina/aprobaciones'
-service PagosService @(requires: 'authenticated-user') {
+service PagosService {
 
-  // ── MASTER ────────────────────────────────────────────────────
-  // onInit() del Master.controller.js
+  // ── Entidades de composición de TareasInbox ─────────────────────
+
+  // Proveedores beneficiarios — Origen: fragment/Proveedores.xml
+  @cds.persistence.skip
+  entity Proveedor {
+    key proveedorId : String(10);
+        ruc         : String(11);
+        nombre      : String(80);
+        glosa       : String(100);
+        monto       : Decimal(13,2);
+        facturas    : String(200);
+  }
+
+  // Documentos adjuntos — Origen: fragment/Adjuntos2.xml
+  @cds.persistence.skip
+  entity Adjunto {
+    key adjuntoId          : String(36);
+        nombre             : String(100);
+        tipoAdjunto        : String(20);
+        activo             : Boolean;
+        docServiceObjectID : String(36);
+  }
+
+  // Historial de aprobaciones — Origen: fragment/Aprobadores.xml
+  @cds.persistence.skip
+  entity Aprobador {
+    key aprobadorId : String(10);
+        usuario     : String(50);
+        rol         : String(30);
+        fechaAprob  : DateTime;
+        aprobado    : Boolean;
+        observacion : String(255);
+  }
+
+  // ── Entidad Media para descarga del PDF de la propuesta ─────────────────────
+  // Patrón estándar CAP: @Core.MediaType en campo LargeBinary.
+  // CAP sirve GET /PropuestaPDF(id)/contenido con Content-Disposition: attachment.
+  // Fuente oficial: cap.cloud.sap/docs/guides/services/media-data
+  // Origen legado: Detail.controller.js → getPropuestaPDFSAP() → Docum base64
+  @cds.persistence.skip
+  entity PropuestaPDF {
+    key id                 : String(50);
+        numeroPropuesta    : String(20);
+        sociedad           : String(4);
+        fechaPropuestaPago : String(10);
+        mimeType           : String @Core.IsMediaType;
+        nombreArchivo      : String;
+        contenido          : LargeBinary @Core.MediaType: mimeType
+                                        @Core.ContentDisposition.Filename: nombreArchivo
+                                        @Core.ContentDisposition.Type: 'attachment';
+  }
+
+  // ── BANDEJA DE TAREAS + DETALLE ─────────────────────────────────
+  // Sirve al List Report (READ sin clave) y a la Object Page (READ con clave).
+  // Origen legado:
+  //   List Report : Master.view.xml
+  //   Object Page : Detail.view.xml (IconTabBar 4 pestañas)
+  @readonly
+  @cds.persistence.skip
+  entity TareasInbox {
+
+    // Clave técnica BPA
+    key instanceID           : String(50);
+
+    // Metadatos de auditoría BPA
+    SAP__Origin              : String(100);
+    creadoPor                : String(100);
+    creadoEn                 : DateTime;
+
+    // Campos del List Report (del PropuestaNomina.json)
+    tituloTarea              : String(100);
+    numeroPropuesta          : String(20);
+    sociedad                 : String(4);
+    fechaPropuestaPago       : String(10);
+    banco                    : String(10);
+    bancoDescripcion         : String(100);
+    viaPago                  : String(1);
+    modalidadPP              : String(10);
+    version                  : String(4);
+    importe                  : String(20);
+    moneda                   : String(5);
+    analista                 : String(12);
+    correoAnalista           : String(100);
+
+    // URL del PDF para descarga desde la Object Page (Tarea 2.3)
+    //     // Calculada en el handler READ por instanceID: /PropuestaPDF('id')/contenido
+    urlPDF               : String;
+
+    // Campos adicionales del Facet 1 — Información (Object Page)
+    estadoPP                 : String(20);
+    usuarioCreacion          : String(100);
+    usuarioCreacionPP        : String(12);
+    existeDocumento          : String(10);
+    indicadorPagoAdelanto    : String(1);
+
+    // Flags de visibilidad por rol — controlan botones en Bloque 3
+    tieneAnalista            : Boolean;
+    estaConforme             : Boolean;
+    tieneRevisor             : Boolean;
+    estaAprobado             : Boolean;
+    esCaja                   : Boolean;
+    estaTerminado            : Boolean;
+    estaAnulado              : Boolean;
+
+    // Campos calculados por el handler — visibilidad doble del Supervisor
+    puedeTerminarFlujo : Boolean; // true cuando estaConforme AND estaTerminado
+    puedeAnular        : Boolean; // true cuando estaConforme AND estaAnulado
+
+    // Composiciones — Facets 2, 3, 4 de la Object Page
+    // Cargadas solo en READ por instanceID (no en el listado)
+    proveedores              : Composition of many Proveedor;
+    adjuntos                 : Composition of many Adjunto;
+    aprobadores              : Composition of many Aprobador;
+    
+
+  }
+
+  // ── FUNCIONES Y ACCIONES ───────────────────────────────────────
 
   @Common.Label: 'Obtener constantes de negocio'
   function obtenerConstantes() returns ConstantesRpta;
 
-  @Common.Label: 'Obtener detalle de propuesta y contexto BPA'
-  function obtenerDetalle(taskId: String) returns {
-    pp         : PropuestaPago;
-    contexto   : ContextoBPA;
-    constantes : ConstantesRpta;
-  };
+ // ── Tipo que representa al usuario autenticado en cada acción ─────────────────
+// Reemplaza el type CurrentUser del legado (PPOData.js → getCurrentUserApi())
+type UsuarioActual {
+  nombre : String; // email del usuario autenticado vía XSUAA
+}
 
-  // ── ANALISTA TESORERÍA ────────────────────────────────────────
+// ── Resultado estándar devuelto por todas las acciones ────────────────────────
+// Reemplaza AccionResult del legado (Detail.controller.js → _procesarRespuesta)
+type ResultadoAccion {
+  exitoso  : Boolean; // true si la acción completó sin errores
+  mensaje  : String;  // mensaje descriptivo para mostrar al usuario
+  estadoPP : String;  // nuevo estado de la propuesta tras la acción
+  taskId   : String;  // ID de la tarea BPA procesada
+}
 
-  @(requires: 'ANALISTA_T')
+// ── ANALISTA TESORERÍA ────────────────────────────────────────────────────────
+// Origen legado: AnalistaTesoreria.js → generarBotones()
+// Flag de visibilidad: tieneAnalista (PropuestaNomina.json)
+
+  // Tarea 3.1 — Enviar al Supervisor o Caja según ViaPago
+  // Legado: botón ENVIAR_SUPER_CAJA
+  @Common.Label: 'Enviar Super/Caja'
   action enviarSupervisorOCaja(
-    pp          : PropuestaPago,
-    currentUser : CurrentUser,
-    taskId      : String,
-    contexto    : ContextoBPA,
-    constantes  : ConstantesRpta
-  ) returns AccionResult;
+    propuesta   : PropuestaNomina, // datos completos de la propuesta
+    usuario     : UsuarioActual,   // usuario que ejecuta la acción
+    taskId      : String,          // ID de la tarea BPA
+    constantes  : ConstantesRpta   // constantes de negocio (rutas, sociedades)
+  ) returns ResultadoAccion;
 
-  @(requires: 'ANALISTA_T')
+  // Tarea 3.1 — Compensar la propuesta con documento SAP
+  // Legado: botón COMPENSAR
+  @Common.Label: 'Compensar'
   action compensar(
-    pp          : PropuestaPago,
-    currentUser : CurrentUser,
-    taskId      : String,
-    contexto    : ContextoBPA
-  ) returns AccionResult;
+    propuesta   : PropuestaNomina,
+    usuario     : UsuarioActual,
+    taskId      : String
+  ) returns ResultadoAccion;
 
-  @(requires: 'ANALISTA_T')
+  // Tarea 3.1 — Cerrar la propuesta por observación del supervisor
+  // Legado: botón CERRAR_OBS — requiere comentario obligatorio
+  @Common.Label: 'Cerrar por obs.'
   action cerrarPorObservacion(
-    pp          : PropuestaPago,
-    currentUser : CurrentUser,
+    propuesta   : PropuestaNomina,
+    usuario     : UsuarioActual,
     taskId      : String,
-    contexto    : ContextoBPA
-  ) returns AccionResult;
+    comentario  : String           // Tarea 3.6: Fiori Elements genera dialog automático
+  ) returns ResultadoAccion;
 
-  @(requires: 'ANALISTA_T')
+  // Tarea 3.1 — Eliminar el documento generado
+  // Legado: botón ELIMINAR_DOC
+  @Common.Label: 'Eliminar Doc.'
   action eliminarDoc(
-    pp          : PropuestaPago,
-    currentUser : CurrentUser,
-    taskId      : String,
-    contexto    : ContextoBPA
-  ) returns AccionResult;
+    propuesta   : PropuestaNomina,
+    usuario     : UsuarioActual,
+    taskId      : String
+  ) returns ResultadoAccion;
 
-  // ── SUPERVISOR ─────────────────────────────────────────────────
+// ── SUPERVISOR ────────────────────────────────────────────────────────────────
+// Origen legado: Supervisor.js → generarBotones()
+// Flag de visibilidad: estaConforme (PropuestaNomina.json)
 
-  @(requires: 'SUPERVISOR')
+  // Tarea 3.2 — Aprobar la propuesta y enrutar al siguiente paso
+  // Legado: botón APROBAR_PP
+  @Common.Label: 'Aprobar PP'
   action supervisorAprobar(
-    pp          : PropuestaPago,
-    currentUser : CurrentUser,
+    propuesta   : PropuestaNomina,
+    usuario     : UsuarioActual,
     taskId      : String,
-    contexto    : ContextoBPA,
     constantes  : ConstantesRpta
-  ) returns AccionResult;
+  ) returns ResultadoAccion;
 
-  @(requires: 'SUPERVISOR')
+  // Tarea 3.2 — Terminar el flujo completo (cancela la instancia BPA)
+  // Legado: botón TERMINAR_FLUJO — visibilidad doble: estaConforme AND estaTerminado
+  @Common.Label: 'Terminar flujo'
   action supervisorTerminarFlujo(
-    pp          : PropuestaPago,
-    currentUser : CurrentUser,
+    propuesta   : PropuestaNomina,
+    usuario     : UsuarioActual,
     taskId      : String,
-    contexto    : ContextoBPA,
     constantes  : ConstantesRpta
-  ) returns AccionResult;
+  ) returns ResultadoAccion;
 
-  @(requires: 'SUPERVISOR')
+  // Tarea 3.2 — Observar la propuesta (devuelve al Analista)
+  // Legado: botón OBSERVAR — requiere comentario obligatorio
+  @Common.Label: 'Observar'
   action supervisorObservar(
-    pp          : PropuestaPago,
-    currentUser : CurrentUser,
+    propuesta   : PropuestaNomina,
+    usuario     : UsuarioActual,
     taskId      : String,
-    contexto    : ContextoBPA,
-    comentario  : String
-  ) returns AccionResult;
+    comentario  : String           // Tarea 3.6: dialog automático de Fiori Elements
+  ) returns ResultadoAccion;
 
-  // ── REVISOR ────────────────────────────────────────────────────
+  // Tarea 3.2 — Anular la propuesta de pago
+  // Legado: botón ANULAR — visibilidad doble: estaConforme AND estaAnulado
+  @Common.Label: 'Anular'
+  action supervisorAnular(
+    propuesta   : PropuestaNomina,
+    usuario     : UsuarioActual,
+    taskId      : String,
+    comentario  : String           // Tarea 3.6: dialog automático obligatorio
+  ) returns ResultadoAccion;
 
-  @(requires: 'REVISOR')
+// ── REVISOR ───────────────────────────────────────────────────────────────────
+// Origen legado: Revisor.js → generarBotones()
+// Flag de visibilidad: tieneRevisor (PropuestaNomina.json)
+
+  // Tarea 3.3 — Aprobar la propuesta en etapa de revisión
+  // Legado: botón APROBAR_PP
+  @Common.Label: 'Aprobar PP'
   action revisorAprobar(
-    pp          : PropuestaPago,
-    currentUser : CurrentUser,
-    taskId      : String,
-    contexto    : ContextoBPA,
-    comentario  : String
-  ) returns AccionResult;
+    propuesta   : PropuestaNomina,
+    usuario     : UsuarioActual,
+    taskId      : String
+  ) returns ResultadoAccion;
 
-  @(requires: 'REVISOR')
+  // Tarea 3.3 — Observar la propuesta en etapa de revisión
+  // Legado: botón OBSERVAR — requiere comentario obligatorio
+  @Common.Label: 'Observar'
   action revisorObservar(
-    pp          : PropuestaPago,
-    currentUser : CurrentUser,
+    propuesta   : PropuestaNomina,
+    usuario     : UsuarioActual,
     taskId      : String,
-    contexto    : ContextoBPA,
-    comentario  : String
-  ) returns AccionResult;
+    comentario  : String           // Tarea 3.6: dialog automático de Fiori Elements
+  ) returns ResultadoAccion;
 
-  // ── APODERADO ──────────────────────────────────────────────────
+// ── APODERADO ─────────────────────────────────────────────────────────────────
+// Origen legado: Apoderado.js → generarBotones()
+// Flag de visibilidad: estaAprobado (PropuestaNomina.json)
 
-  @(requires: 'APODERADO')
+  // Tarea 3.4 — Firmar la propuesta (F1 o F2 según contadorFirma)
+  // Legado: botón APROBAR_PP (firma) — el handler decide F1/F2 internamente
+  @Common.Label: 'Firmar'
   action apoderadoFirmar(
-    pp          : PropuestaPago,
-    currentUser : CurrentUser,
+    propuesta   : PropuestaNomina, // contiene contadorFirma para F1/F2
+    usuario     : UsuarioActual,
     taskId      : String,
-    contexto    : ContextoBPA,
     constantes  : ConstantesRpta
-  ) returns AccionResult;
+  ) returns ResultadoAccion;
 
-  @(requires: 'APODERADO')
+  // Tarea 3.4 — Observar la propuesta en etapa de firma
+  // Legado: botón OBSERVAR — requiere comentario obligatorio
+  @Common.Label: 'Observar'
   action apoderadoObservar(
-    pp          : PropuestaPago,
-    currentUser : CurrentUser,
+    propuesta   : PropuestaNomina,
+    usuario     : UsuarioActual,
     taskId      : String,
-    contexto    : ContextoBPA,
-    comentario  : String
-  ) returns AccionResult;
+    comentario  : String           // Tarea 3.6: dialog automático de Fiori Elements
+  ) returns ResultadoAccion;
 
-  // ── CAJA ───────────────────────────────────────────────────────
+  // Tarea 3.4 — Redirigir a otro apoderado
+  // Legado: botón REDIRIGIR_APODERADO
+  @Common.Label: 'Redirigir Apoderado'
+  action redirigirApoderado(
+    propuesta   : PropuestaNomina,
+    usuario     : UsuarioActual,
+    taskId      : String,
+    comentario  : String           // nuevo apoderado destino
+  ) returns ResultadoAccion;
 
-  @(requires: 'CAJA')
+// ── CAJA ──────────────────────────────────────────────────────────────────────
+// Origen legado: Caja.js → generarBotones()
+// Flag de visibilidad: esCaja (PropuestaNomina.json)
+// El estado EN_CAJA es informativo — se muestra como campo estadoPP en el header,
+// NO como botón (Tarea 3.5)
+
+  // Tarea 3.5 — Confirmar el pago en caja (cierra el flujo)
+  // Legado: botón CONFIRMAR_PAGO
+  @Common.Label: 'Confirmar Pago'
   action cajaConfirmarPago(
-    pp          : PropuestaPago,
-    currentUser : CurrentUser,
-    taskId      : String,
-    contexto    : ContextoBPA
-  ) returns AccionResult;
+    propuesta   : PropuestaNomina,
+    usuario     : UsuarioActual,
+    taskId      : String
+  ) returns ResultadoAccion;
 
-  @(requires: 'CAJA')
+  // Tarea 3.5 — Observar en etapa de caja (devuelve al Analista)
+  // Legado: botón OBSERVAR — requiere comentario obligatorio
+  @Common.Label: 'Observar'
   action cajaObservar(
-    pp          : PropuestaPago,
-    currentUser : CurrentUser,
+    propuesta   : PropuestaNomina,
+    usuario     : UsuarioActual,
     taskId      : String,
-    contexto    : ContextoBPA,
-    comentario  : String
-  ) returns AccionResult;
+    comentario  : String           // Tarea 3.6: dialog automático de Fiori Elements
+  ) returns ResultadoAccion;
+
+
 }

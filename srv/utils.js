@@ -20,8 +20,6 @@
  */
 
 const cds = require("@sap/cds");
-const gw   = require("./infrastructure/sap-gateway-client");
-const hana = require("./infrastructure/hana-client");
 const LOG  = cds.log("utils-service");
 
 module.exports = cds.service.impl(async function (srv) {

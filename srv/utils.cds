@@ -25,7 +25,7 @@
 // ─────────────────────────────────────────────────────────────────
 
 @path: '/nomina/utils'
-service UtilsService @(requires: 'authenticated-user') {
+service UtilsService {
 
   // ── Tipos ─────────────────────────────────────────────────────
 

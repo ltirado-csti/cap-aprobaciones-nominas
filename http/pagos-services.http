@@ -1,11 +1,29 @@
 @server=http://localhost:4004
 @path=/nomina/aprobaciones
 
-### GET Metadata
+
+### Metadata
 GET {{server}}{{path}}/$metadata
-Authorization: Basic YWxpY2U6YWxpY2U=
 
+### GET List Report — lista de tareas
+GET {{server}}{{path}}/TareasInbox
 
-### GET Constantes
-GET {{server}}{{path}}/obtenerConstantes
-Authorization: Basic YWxpY2U6YWxpY2U=
+###
+
+### GET Object Page — detalle de tarea
+GET {{server}}{{path}}/TareasInbox(instanceID='mock-task-001')
+
+###
+
+### GET Composición proveedores
+GET {{server}}{{path}}/TareasInbox(instanceID='mock-task-001')/proveedores
+
+###
+
+### GET Composición adjuntos
+GET {{server}}{{path}}/TareasInbox(instanceID='mock-task-001')/adjuntos
+
+###
+
+### GET Composición aprobadores
+GET {{server}}{{path}}/TareasInbox(instanceID='mock-task-001')/aprobadores

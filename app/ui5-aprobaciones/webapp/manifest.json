@@ -1,0 +1,275 @@
+{
+  "_version": "1.65.0",
+  "sap.app": {
+    "id": "centria.h2hpp.aprobaciones.ui5aprobaciones",
+    "type": "application",
+    "i18n": "i18n/i18n.properties",
+    "applicationVersion": {
+      "version": "1.0.0"
+    },
+    "title": "{{appTitle}}",
+    "description": "{{appDescription}}",
+    "dataSources": {
+      "mainService": {
+        "uri": "/nomina/aprobaciones/",
+        "type": "OData",
+        "settings": {
+          "odataVersion": "4.0",
+          "localUri": "localService/metadata.xml"
+        }
+      }
+    },
+    "offline": false
+  },
+  "sap.ui": {
+    "technology": "UI5",
+    "icons": {
+      "icon": "sap-icon://inbox"
+    },
+    "deviceTypes": {
+      "desktop": true,
+      "tablet": true,
+      "phone": true
+    }
+  },
+  "sap.ui5": {
+    "flexEnabled": true,
+    "dependencies": {
+      "minUI5Version": "1.120.0",
+      "libs": {
+        "sap.m": {},
+        "sap.f": {},
+        "sap.ui.core": {},
+        "sap.fe.templates": {}
+      }
+    },
+    "contentDensities": {
+      "compact": true,
+      "cozy": true
+    },
+    "models": {
+      "i18n": {
+        "type": "sap.ui.model.resource.ResourceModel",
+        "settings": {
+          "bundleName": "centria.h2hpp.aprobaciones.ui5aprobaciones.i18n.i18n",
+          "supportedLocales": [
+            ""
+          ],
+          "fallbackLocale": ""
+        }
+      },
+      "": {
+        "dataSource": "mainService",
+        "preload": true,
+        "settings": {
+          "synchronizationMode": "None",
+          "operationMode": "Server",
+          "autoExpandSelect": true,
+          "earlyRequests": true
+        }
+      }
+    },
+    "rootView": {
+      "viewName": "sap.fe.core.rootView.Fcl",
+      "type": "XML",
+      "async": true,
+      "id": "appRootView"
+    },
+    "routing": {
+      "config": {
+        "routerClass": "sap.f.routing.Router",
+        "flexibleColumnLayout": {
+          "defaultTwoColumnLayoutType": "TwoColumnsMidExpanded",
+          "defaultThreeColumnLayoutType": "ThreeColumnsMidExpanded"
+        }
+      },
+      "routes": [
+        {
+          "pattern": ":?query:",
+          "name": "TareasInboxList",
+          "target": "TareasInboxList"
+        },
+        {
+          "pattern": "TareasInbox({key}):?query:",
+          "name": "TareasInboxObjectPage",
+          "target": [
+            "TareasInboxList",
+            "TareasInboxObjectPage"
+          ]
+        }
+      ],
+      "targets": {
+        "TareasInboxList": {
+          "type": "Component",
+          "id": "TareasInboxList",
+          "name": "sap.fe.templates.ListReport",
+          "controlAggregation": "beginColumnPages",
+          "contextPattern": "",
+          "options": {
+            "settings": {
+              "entitySet": "TareasInbox",
+              "variantManagement": "Page",
+              "initialLoad": true,
+              "navigation": {
+                "TareasInbox": {
+                  "detail": {
+                    "route": "TareasInboxObjectPage"
+                  }
+                }
+              },
+              "controlConfiguration": {
+                "@com.sap.vocabularies.UI.v1.LineItem": {
+                  "tableSettings": {
+                    "type": "ResponsiveTable",
+                    "selectionMode": "None",
+                    "enableExport": true,
+                    "enableFullScreen": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "TareasInboxObjectPage": {
+          "type": "Component",
+          "id": "TareasInboxObjectPage",
+          "name": "sap.fe.templates.ObjectPage",
+          "controlAggregation": "midColumnPages",
+          "contextPattern": "TareasInbox({key})",
+          "options": {
+            "settings": {
+              "entitySet": "TareasInbox",
+              "editableHeaderContent": false,
+              "content": {
+                "header": {
+                  "actions": {
+                    "enviarSupervisorOCaja": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onEnviarSupervisorOCaja",
+                      "enabled": "{tieneAnalista}",
+                      "visible": "{tieneAnalista}",
+                      "text": "Enviar Super/Caja"
+                    },
+                    "compensar": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onCompensar",
+                      "enabled": "{tieneAnalista}",
+                      "visible": "{tieneAnalista}",
+                      "text": "Compensar"
+                    },
+                    "cerrarPorObservacion": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onCerrarPorObservacion",
+                      "enabled": "{tieneAnalista}",
+                      "visible": "{tieneAnalista}",
+                      "text": "Cerrar por Obs."
+                    },
+                    "eliminarDoc": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onEliminarDoc",
+                      "enabled": "{tieneAnalista}",
+                      "visible": "{tieneAnalista}",
+                      "text": "Eliminar Doc."
+                    },
+                    "supervisorAprobar": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onSupervisorAprobar",
+                      "enabled": "{estaConforme}",
+                      "visible": "{estaConforme}",
+                      "text": "Aprobar PP"
+                    },
+                    "supervisorTerminarFlujo": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onSupervisorTerminarFlujo",
+                      "enabled": "{puedeTerminarFlujo}",
+                      "visible": "{puedeTerminarFlujo}",
+                      "text": "Terminar Flujo"
+                    },
+                    "supervisorObservar": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onSupervisorObservar",
+                      "enabled": "{estaConforme}",
+                      "visible": "{estaConforme}",
+                      "text": "Observar"
+                    },
+                    "supervisorAnular": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onSupervisorAnular",
+                      "enabled": "{puedeAnular}",
+                      "visible": "{puedeAnular}",
+                      "text": "Anular"
+                    },
+                    "revisorAprobar": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onRevisorAprobar",
+                      "enabled": "{tieneRevisor}",
+                      "visible": "{tieneRevisor}",
+                      "text": "Aprobar PP"
+                    },
+                    "revisorObservar": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onRevisorObservar",
+                      "enabled": "{tieneRevisor}",
+                      "visible": "{tieneRevisor}",
+                      "text": "Observar"
+                    },
+                    "apoderadoFirmar": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onApoderadoFirmar",
+                      "enabled": "{estaAprobado}",
+                      "visible": "{estaAprobado}",
+                      "text": "Firmar"
+                    },
+                    "apoderadoObservar": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onApoderadoObservar",
+                      "enabled": "{estaAprobado}",
+                      "visible": "{estaAprobado}",
+                      "text": "Observar"
+                    },
+                    "redirigirApoderado": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onRedirigirApoderado",
+                      "enabled": "{estaAprobado}",
+                      "visible": "{estaAprobado}",
+                      "text": "Redirigir Apoderado"
+                    },
+                    "cajaConfirmarPago": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onCajaConfirmarPago",
+                      "enabled": "{esCaja}",
+                      "visible": "{esCaja}",
+                      "text": "Confirmar Pago"
+                    },
+                    "cajaObservar": {
+                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onCajaObservar",
+                      "enabled": "{esCaja}",
+                      "visible": "{esCaja}",
+                      "text": "Observar"
+                    }
+                  }
+                }
+              },
+              "controlConfiguration": {
+                "proveedores/@com.sap.vocabularies.UI.v1.LineItem": {
+                  "tableSettings": {
+                    "type": "ResponsiveTable"
+                  }
+                },
+                "adjuntos/@com.sap.vocabularies.UI.v1.LineItem": {
+                  "tableSettings": {
+                    "type": "ResponsiveTable"
+                  }
+                },
+                "aprobadores/@com.sap.vocabularies.UI.v1.LineItem": {
+                  "tableSettings": {
+                    "type": "ResponsiveTable"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "extends": {
+      "extensions": {
+        "sap.ui.controllerExtensions": {
+          "sap.fe.templates.ObjectPage.ObjectPageController": {
+            "controllerName": "centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler"
+          }
+        }
+      }
+    }
+  },
+  "sap.fiori": {
+    "registrationIds": [],
+    "archeType": "transactional"
+  }
+}

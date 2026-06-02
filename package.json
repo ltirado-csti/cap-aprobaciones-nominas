@@ -2,14 +2,51 @@
   "name": "cap-aprobacion-nomina",
   "version": "1.0.0",
   "dependencies": {
+    "@sap-cloud-sdk/connectivity": "^4.7.0",
+    "@sap-cloud-sdk/http-client": "^4.7.0",
     "@sap/cds": "^9"
   },
   "devDependencies": {
     "@cap-js/sqlite": "^2.4",
-    "@sap/cds-dk": "^9"
+    "@sap/cds-dk": "^9",
+    "cds-plugin-ui5": "^0.13.0",
+    "rimraf": "^5.0.5",
+    "mbt": "^1.2.49"
   },
   "scripts": {
-    "start": "cds-serve"
+    "start"                  : "cds-serve",
+    "watch:hybrid"           : "cds watch --profile hybrid",
+    "bind:dest"              : "cds bind --to destination",
+    "bind:bpa"               : "cds bind --to BPA_WORKFLOW_INSTANCE",
+    "watch-ui5-aprobaciones" : "cds watch --open centria.h2hpp.aprobaciones.ui5aprobaciones/index.html?sap-ui-xx-viewCache=false --livereload false",
+    "undeploy"               : "cf undeploy cap-aprobacion-nomina --delete-services --delete-service-keys --delete-service-brokers",
+    "build"                  : "rimraf resources mta_archives && mbt build --mtar archive",
+    "deploy"                 : "cf deploy mta_archives/archive.mtar --retries 1"
   },
-  "private": true
+  "private": true,
+  "workspaces": [
+    "app/*"
+  ],
+  "sapux": [
+    "app/ui5-aprobaciones"
+  ],
+  "cds": {
+    "requires": {
+      "auth": "dummy"
+    },
+    "[hybrid]": {
+      "requires": {
+        "auth": "xsuaa"
+      }
+    },
+    "cds-plugin-ui5": {
+      "flp": {
+        "apps": [
+          {
+            "local": "app/ui5-aprobaciones"
+          }
+        ]
+      }
+    }
+  }
 }

@@ -21,8 +21,6 @@
  *   domain/propuesta.service         → actualizarEstado, buildHanaPath
  */
 
-const hana  = require("../infrastructure/hana-client");
-const gw    = require("../infrastructure/sap-gateway-client");
 const cpi   = require("../infrastructure/cpi-client");
 const bpa   = require("../infrastructure/bpa-client");
 const prop  = require("./propuesta.service");

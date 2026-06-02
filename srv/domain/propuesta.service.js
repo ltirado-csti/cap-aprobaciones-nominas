@@ -17,8 +17,6 @@
  *   VALIDACIÓN   → checkAdelanto, evaluarDocumentoAdjunto
  */
 
-const hana = require("../infrastructure/hana-client");
-const gw   = require("../infrastructure/sap-gateway-client");
 const cds  = require("@sap/cds");
 const LOG  = cds.log("propuesta.service");
 
