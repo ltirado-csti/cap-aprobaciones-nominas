@@ -13,11 +13,6 @@
  *   handle_revisor()       → revisorAprobar, revisorObservar
  *   handle_apoderado()     → apoderadoFirmar, apoderadoObservar, redirigirApoderado
  *   handle_caja()          → cajaConfirmarPago, cajaObservar
- *
- * DISEÑO — Un handler READ para dos pantallas:
- *   Sin clave (req.params vacío)  → List Report: lista liviana desde BPA
- *   Con clave (instanceID)        → Object Page: detalle completo con composiciones
- *                                   y flags de visibilidad por rol (Bloque 3)
  */
 
 const cds      = require("@sap/cds");
@@ -126,20 +121,43 @@ class PagosService extends cds.ApplicationService {
   static handle_inbox() {
     /**
      * GET /nomina/aprobaciones/TareasInbox
-     * Sin clave → List Report: lista liviana desde BPA sin composiciones.
-     * Con clave → Object Page: detalle completo con composiciones y flags de rol.
+     * Sin clave -> List Report: lista liviana desde BPA sin composiciones.
+     * Con clave -> Object Page: detalle completo con composiciones y flags de rol.
      * Origen legado: Master.controller.js + Detail.controller.js → _onBindingChange
      */
     this.on("READ", "TareasInbox", async (req) => {
       const instanceID = req.params?.[0]?.instanceID ?? req.params?.[0];
 
-      if (instanceID) {
-        return await _obtenerDetalleTarea(instanceID);
+      // Sin clave → List Report
+      if (!instanceID) {
+        const tareas = (await _obtenerTareasBpa());
+        tareas.$count = tareas.length;
+        return tareas;
       }
 
-      const tareas = (await _obtenerTareasBpa()).map(_mapearTareaInbox);
-      tareas.$count = tareas.length;
-      return tareas;
+      // Con clave → verificar si se necesita el detalle completo de CPI.
+      // FCL hace $batch con $select reducido al seleccionar filas automáticamente.
+      const columnas   = req.query?.SELECT?.columns ?? [];
+      const nombres    = columnas.map(c => c?.ref?.[0]).filter(Boolean);
+
+      // Campos que pertenecen SOLO al Object Page (requieren llamada a CPI)
+      const camposCPI  = ["proveedores", "adjuntos", "aprobadores",
+                          "numeroPropuesta", "estadoPP", "indPAdelanto",
+                          "nroDocCompensacion", "fechaCompensacion"];
+
+      const necesitaCPI = nombres.length === 0 ||
+                          nombres.some(nombre => camposCPI.includes(nombre));
+
+      if (!necesitaCPI) {
+        // FCL pidió solo campos livianos (importe, moneda, fechaPropuestaPago)
+        // Retornar solo el contexto BPA sin llamar a CPI
+        LOG.info(`[READ TareasInbox] $select liviano — omitiendo CPI | id=${instanceID}`);
+        const contexto = await bpa.readContext(instanceID);
+        return contexto ? _mapearContextoBpa(instanceID, contexto) : null;
+      }
+
+      // $select completo o vacío → detalle completo con CPI
+      return await _obtenerDetalleTarea(instanceID);
     });
   }
 
@@ -332,209 +350,268 @@ class PagosService extends cds.ApplicationService {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// FUNCIONES PRIVADAS
-// Ubicación: después del cierre de la clase, antes de module.exports.
-// Tienen acceso a bpa, propSvc, constSvc, cpiInfra, LOG (require del módulo).
-// ═══════════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // FUNCIONES PRIVADAS
+  // Tienen acceso a bpa, propSvc, constSvc, cpiInfra, LOG.
+  // ═══════════════════════════════════════════════════════════════════════════════
+  
 
-/**
- * Obtiene la lista de tareas pendientes desde SAP BPA.
- * En modo híbrido conecta a BPA_WORKFLOW; en local retorna mock.
- * Origen legado: Master.controller.js → getInboxTasks() → WorkFlow.js
- *
- * @returns {Promise<Array>} Lista de tareas BPA sin transformar
- */
-async function _obtenerTareasBpa() {
-  try {
-    const tareas = await bpa.getInboxTasks();
-    return tareas ?? [];
-  } catch (oError) {
-    LOG.warn(`[_obtenerTareasBpa] BPA no disponible — usando mock | ${oError.message}`);
-    return _getMockTareas();
-  }
-}
+  /**
+   * Obtiene y enriquece la lista de tareas del BPA con su contexto.
+   * Origen legado: Master.controller.js → getInboxTasks() + readContext()
+   * @returns {Promise<Array>} Lista de TareasInbox enriquecidas con contexto
+   */
+  async function _obtenerTareasBpa() {
+    try {
+      const tareas = await bpa.getInboxTasks();
+      if (!tareas.length) return [];
 
-/**
- * Transforma una tarea BPA raw al shape liviano de TareasInbox para el List Report.
- * Los flags de rol se inicializan en false — se calculan al abrir el detalle.
- * Origen legado: Master.controller.js → _onDataReceived() + formatter.js
- *
- * @param {object} oTarea - Tarea raw devuelta por BPA con contexto embebido
- * @returns {object} Registro TareasInbox sin composiciones
- */
-function _mapearTareaInbox(oTarea) {
-  const ctx = oTarea.context ?? oTarea;
-  return {
-    instanceID          : oTarea.instanceID ?? oTarea.id,
-    tituloTarea         : ctx.tituloTarea  ?? oTarea.subject,
-    numeroPropuesta     : ctx.numeroPropuesta,
-    sociedad            : ctx.sociedad,
-    banco               : ctx.banco,
-    bancoDescripcion    : ctx.bancoDescripcion,
-    importe             : ctx.importe,
-    moneda              : ctx.moneda,
-    viaPago             : ctx.viaPago,
-    modalidadPP         : ctx.modalidadPP,
-    version             : ctx.version,
-    fechaPropuestaPago  : ctx.fechaPropuestaPago,
-    usuarioCreacion     : ctx.usuarioCreacion,
-    // Flags de rol — false en el List Report, se calculan en _ensamblarDetalle
-
-    // Flags de rol — se leen del contexto BPA directamente
-    // En producción BPA los devuelve; en mock se toman del contexto embebido
-    tieneAnalista      : ctx.tieneAnalista      ?? false,
-    estaConforme       : ctx.estaConforme       ?? false,
-    tieneRevisor       : ctx.tieneRevisor       ?? false,
-    estaAprobado       : ctx.estaAprobado       ?? false,
-    esCaja             : ctx.esCaja             ?? false,
-    estaTerminado      : ctx.estaTerminado      ?? false,
-    estaAnulado        : ctx.estaAnulado        ?? false,
-    puedeTerminarFlujo : (ctx.estaConforme ?? false) && (ctx.estaTerminado ?? false),
-    puedeAnular        : (ctx.estaConforme ?? false) && (ctx.estaAnulado   ?? false),
-  };
-}
-
-/**
- * Obtiene el detalle completo de una tarea para la Object Page.
- * Llama a BPA y composiciones en paralelo para minimizar latencia.
- * Origen legado: Detail.controller.js → _onBindingChange()
- *
- * @param {string} instanceID - ID de la tarea BPA
- * @returns {Promise<object>} Registro completo con shape de TareasInbox
- */
-async function _obtenerDetalleTarea(instanceID) {
-  try {
-    const [contexto, proveedores, adjuntos, aprobadores] = await Promise.all([
-      bpa.readContext(instanceID),
-      propSvc.obtenerProveedores(instanceID).catch(() => []),
-      propSvc.obtenerAdjuntos(instanceID).catch(() => []),
-      propSvc.obtenerAprobadores(instanceID).catch(() => []),
-    ]);
-
-    if (!contexto) {
-      throw Object.assign(
-        new Error(`Contexto BPA no encontrado para la tarea ${instanceID}`),
-        { status: 404 }
+      // Enriquecer cada tarea con su contexto en paralelo
+      const tareasEnriquecidas = await Promise.all(
+        tareas.map(tarea => _enriquecerConContexto(tarea))
       );
+
+      return tareasEnriquecidas;
+
+    } catch (error) {
+      LOG.warn(`[_obtenerTareasBpa] BPA no disponible — usando mock | ${error.message}`);
+      return _getMockTareas();
     }
-
-    const propuesta = contexto.propuesta ?? contexto;
-    return _ensamblarDetalle({ instanceID, propuesta, proveedores, adjuntos, aprobadores });
-
-  } catch (oError) {
-    if (oError.status === 404) throw oError;
-    LOG.warn(`[_obtenerDetalleTarea] BPA no disponible — usando mock | ${oError.message}`);
-    return _getMockDetalle(instanceID);
   }
-}
 
-/**
- * Ensambla el objeto final TareasInbox con campos, composiciones y flags de rol.
- *
- * Bloque 3 — campos calculados para visibilidad doble del Supervisor (Tarea 3.2):
- *   puedeTerminarFlujo = estaConforme AND estaTerminado
- *   puedeAnular        = estaConforme AND estaAnulado
- * Fiori Elements no soporta expresiones AND en @Core.OperationAvailable —
- * se pre-calculan aquí como booleanos independientes en TareasInbox.
- *
- * @param {object} params - { instanceID, propuesta, proveedores, adjuntos, aprobadores }
- * @returns {object} Registro TareasInbox listo para la Object Page
- */
-function _ensamblarDetalle({ instanceID, propuesta, proveedores, adjuntos, aprobadores }) {
-  // Campos base — nombres exactos de PropuestaNomina.json
-  const base = {
-    instanceID            : instanceID,
-    tituloTarea           : propuesta.tituloTarea,
-    numeroPropuesta       : propuesta.numeroPropuesta,
-    sociedad              : propuesta.sociedad,
-    banco                 : propuesta.banco,
-    bancoDescripcion      : propuesta.bancoDescripcion,
-    importe               : propuesta.importe,
-    moneda                : propuesta.moneda,
-    viaPago               : propuesta.viaPago,
-    modalidadPP           : propuesta.modalidadPP,
-    version               : propuesta.version,
-    fechaPropuestaPago    : propuesta.fechaPropuestaPago,
-    usuarioCreacion       : propuesta.usuarioCreacion,
-    usuarioCreacionPP     : propuesta.usuarioCreacionPP,
-    analista              : propuesta.analista,
-    correoAnalista        : propuesta.correoAnalista,
-    existeDocumento       : propuesta.existeDocumento,
-    indicadorPagoAdelanto : propuesta.indicadorPagoAdelanto,
-    contadorFirma         : propuesta.contadorFirma,
-    usuarioApoderado      : propuesta.usuarioApoderado,
-    usuarioCaja           : propuesta.usuarioCaja,
-    usuariosRevisores     : propuesta.usuariosRevisores,
-    usuariosAnalistas     : propuesta.usuariosAnalistas,
-    usuariosSupervisores  : propuesta.usuariosSupervisores,
-  };
+  /**
+   * Enriquece una tarea BPA con su contexto para el List Report.
+   * @param {object} tarea - Tarea raw del BPA (getInboxTasks)
+   * @returns {Promise<object>} TareasInbox con campos de negocio completos
+   */
+  async function _enriquecerConContexto(tarea) {
+    try {
+      const contexto  = await bpa.readContext(tarea.id);
+      const propuesta = contexto?.startEvent?.propuesta ?? {};
 
-  // Flags de visibilidad por rol (Tareas 3.1 a 3.5)
-  // Nombres exactos de PropuestaNomina.json — sin prefijo "b" del legado
-  const flagsRol = {
-    tieneAnalista : propuesta.tieneAnalista ?? false,
-    estaConforme  : propuesta.estaConforme  ?? false,
-    tieneRevisor  : propuesta.tieneRevisor  ?? false,
-    estaAprobado  : propuesta.estaAprobado  ?? false,
-    esCaja        : propuesta.esCaja        ?? false,
-    estaTerminado : propuesta.estaTerminado ?? false,
-    estaAnulado   : propuesta.estaAnulado   ?? false,
-  };
+      return {
+        instanceID         : tarea.id,
+        tituloTarea        : tarea.subject              || propuesta.tituloTarea      || "",
+        numeroPropuesta    : propuesta.numeroPropuesta   ?? "",
+        sociedad           : propuesta.sociedad          ?? "",
+        banco              : propuesta.banco             ?? "",
+        bancoDescripcion   : propuesta.bancoDescripcion  ?? "",
+        importe            : propuesta.importe           ?? "",
+        moneda             : propuesta.moneda            ?? "",
+        viaPago            : propuesta.viaPago           ?? "",
+        modalidadPP        : propuesta.modalidadPP       ?? "",
+        version            : propuesta.version           ?? "",
+        fechaPropuestaPago : propuesta.fechaPropuestaPago ?? "",
+        usuarioCreacion    : propuesta.usuarioCreacion    ?? "",
+        correoAnalista     : propuesta.correoAnalista     ?? "",
+        // Flags de rol — leídos directamente del contexto BPA
+        tieneAnalista      : propuesta.tieneAnalista      ?? false,
+        estaConforme       : propuesta.estaConforme       ?? false,
+        tieneRevisor       : propuesta.tieneRevisor       ?? false,
+        estaAprobado       : propuesta.estaAprobado       ?? false,
+        esCaja             : propuesta.esCaja             ?? false,
+        estaTerminado      : propuesta.estaTerminado      ?? false,
+        estaAnulado        : propuesta.estaAnulado        ?? false,
+        puedeTerminarFlujo : (propuesta.estaConforme ?? false) && (propuesta.estaTerminado ?? false),
+        puedeAnular        : (propuesta.estaConforme ?? false) && (propuesta.estaAnulado   ?? false),
+      };
 
-  // Campos calculados para visibilidad doble del Supervisor (Tarea 3.2)
-  const flagsCalculados = {
-    puedeTerminarFlujo : flagsRol.estaConforme && flagsRol.estaTerminado,
-    puedeAnular        : flagsRol.estaConforme && flagsRol.estaAnulado,
-  };
+    } catch (error) {
+      // readContext falló para esta tarea — retornar con datos mínimos
+      // para no bloquear el resto de la lista
+      LOG.warn(`[_enriquecerConContexto] readContext falló | id=${tarea.id} | ${error.message}`);
+      return {
+        instanceID         : tarea.id,
+        tituloTarea        : tarea.subject ?? "",
+        numeroPropuesta    : "", sociedad: "", banco: "", bancoDescripcion: "",
+        importe            : "", moneda: "", viaPago: "", modalidadPP: "",
+        version            : "", fechaPropuestaPago: "", usuarioCreacion: "",
+        correoAnalista     : "",
+        tieneAnalista      : false, estaConforme: false, tieneRevisor: false,
+        estaAprobado       : false, esCaja: false, estaTerminado: false,
+        estaAnulado        : false, puedeTerminarFlujo: false, puedeAnular: false,
+      };
+    }
+  }
 
-  return {
-    ...base,
-    ...flagsRol,
-    ...flagsCalculados,
-    proveedores,
-    adjuntos,
-    aprobadores,
-  };
-}
+  /**
+   * Obtiene el detalle completo de una tarea para la Object Page.
+   * Llama a BPA y composiciones en paralelo para minimizar latencia.
+   * Origen legado: Detail.controller.js → _onBindingChange()
+   *
+   * @param {string} instanceID - ID de la tarea BPA
+   * @returns {Promise<object>} Registro completo con shape de TareasInbox
+   */
+  async function _obtenerDetalleTarea(instanceID) {
+    try {
+      // Primero obtener el contexto — las composiciones dependen de sus datos
+      const contexto = await bpa.readContext(instanceID);
 
-/**
- * Extrae el instanceID del padre desde el path de una solicitud de composición.
- * El path de CAP viene como: TareasInbox(instanceID='...')/proveedores
- * Origen legado: ninguno — patrón nuevo de CAP para entidades virtuales.
- *
- * @param {object} req - Request CAP de una composición
- * @returns {string|null} instanceID de la tarea padre
- */
-function _extraerInstanceID(req) {
-  const aParams = req.params ?? [];
+      if (!contexto) {
+        throw Object.assign(
+          new Error(`Contexto BPA no encontrado para la tarea ${instanceID}`),
+          { status: 404 }
+        );
+      }
 
-  // Caso 1: params[0] es objeto con propiedad instanceID (navegación OData)
-  if (aParams[0]?.instanceID) return aParams[0].instanceID;
+      const propuesta = contexto.propuesta ?? contexto;
 
-  // Caso 2: params[0] es string directo
-  if (typeof aParams[0] === "string") return aParams[0];
+      // Luego obtener las composiciones en paralelo usando las funciones privadas
+      const [proveedores, adjuntos, aprobadores] = await Promise.all([
+        _obtenerProveedores(propuesta).catch(() => []),
+        _obtenerAdjuntos(propuesta).catch(() => []),
+        _obtenerAprobadores(propuesta).catch(() => [])
+      ]);
 
-  // Caso 3: viene como filtro en el query (Fiori Elements en algunos escenarios)
-  const sFromQuery = req.query?.SELECT?.from?.ref?.[0]?.where?.find?.(
-    w => w?.ref?.[0] === "instanceID"
-  )?.val;
+      return _ensamblarDetalle({ instanceID, propuesta, proveedores, adjuntos, aprobadores });
 
-  return sFromQuery ?? null;
-}
+    } catch (error) {
+      if (error.status === 404) throw error;
+      LOG.warn(`[_obtenerDetalleTarea] BPA no disponible — usando mock | ${error.message}`);
+      return _getMockDetalle(instanceID);
+    }
+  }
 
-/**
- * Parsea "dd-MM-yyyy" (formato del contexto BPA) a objeto Date JavaScript.
- * Necesaria para claves datetime de SAP Gateway: Laufd=datetime'yyyy-MM-ddT...'
- *
- * @param {string} sFecha - Fecha en formato "dd-MM-yyyy" (ej: "20-05-2026")
- * @returns {Date} Objeto Date en hora cero UTC
- */
-function _parseFechaPP(sFecha) {
-  if (!sFecha) return new Date();
-  const [dd, mm, yyyy] = sFecha.split("-");
-  return new Date(`${yyyy}-${mm}-${dd}T00:00:00.000Z`);
-}
+  /**
+   * Ensambla el objeto final TareasInbox con campos, composiciones y flags de rol.
+   *
+   * Campos calculados para visibilidad doble del Supervisor
+   *   puedeTerminarFlujo = estaConforme AND estaTerminado
+   *   puedeAnular        = estaConforme AND estaAnulado
+   *
+   * @param {object} params - { instanceID, propuesta, proveedores, adjuntos, aprobadores }
+   * @returns {object} Registro TareasInbox listo para la Object Page
+   */
+  function _ensamblarDetalle({ instanceID, propuesta, proveedores, adjuntos, aprobadores }) {
+    // Campos base — nombres exactos de PropuestaNomina.json
+    const base = {
+      instanceID            : instanceID,
+      tituloTarea           : propuesta.tituloTarea,
+      numeroPropuesta       : propuesta.numeroPropuesta,
+      sociedad              : propuesta.sociedad,
+      banco                 : propuesta.banco,
+      bancoDescripcion      : propuesta.bancoDescripcion,
+      importe               : propuesta.importe,
+      moneda                : propuesta.moneda,
+      viaPago               : propuesta.viaPago,
+      modalidadPP           : propuesta.modalidadPP,
+      version               : propuesta.version,
+      fechaPropuestaPago    : propuesta.fechaPropuestaPago,
+      usuarioCreacion       : propuesta.usuarioCreacion,
+      usuarioCreacionPP     : propuesta.usuarioCreacionPP,
+      analista              : propuesta.analista,
+      correoAnalista        : propuesta.correoAnalista,
+      existeDocumento       : propuesta.existeDocumento,
+      indicadorPagoAdelanto : propuesta.indicadorPagoAdelanto,
+      contadorFirma         : propuesta.contadorFirma,
+      usuarioApoderado      : propuesta.usuarioApoderado,
+      usuarioCaja           : propuesta.usuarioCaja,
+      usuariosRevisores     : propuesta.usuariosRevisores,
+      usuariosAnalistas     : propuesta.usuariosAnalistas,
+      usuariosSupervisores  : propuesta.usuariosSupervisores,
+    };
+
+    // Flags de visibilidad por rol (Tareas 3.1 a 3.5)
+    // Nombres exactos de PropuestaNomina.json — sin prefijo "b" del legado
+    const flagsRol = {
+      tieneAnalista : propuesta.tieneAnalista ?? false,
+      estaConforme  : propuesta.estaConforme  ?? false,
+      tieneRevisor  : propuesta.tieneRevisor  ?? false,
+      estaAprobado  : propuesta.estaAprobado  ?? false,
+      esCaja        : propuesta.esCaja        ?? false,
+      estaTerminado : propuesta.estaTerminado ?? false,
+      estaAnulado   : propuesta.estaAnulado   ?? false,
+    };
+
+    // Campos calculados para visibilidad doble del Supervisor (Tarea 3.2)
+    const flagsCalculados = {
+      puedeTerminarFlujo : flagsRol.estaConforme && flagsRol.estaTerminado,
+      puedeAnular        : flagsRol.estaConforme && flagsRol.estaAnulado,
+    };
+
+    return {
+      ...base,
+      ...flagsRol,
+      ...flagsCalculados,
+      proveedores,
+      adjuntos,
+      aprobadores,
+    };
+  }
+
+  /**
+   * Extrae el instanceID del padre desde el path de una solicitud de composición.
+   * El path de CAP viene como: TareasInbox(instanceID='...')/proveedores
+   * Origen legado: ninguno — patrón nuevo de CAP para entidades virtuales.
+   *
+   * @param {object} req - Request CAP de una composición
+   * @returns {string|null} instanceID de la tarea padre
+   */
+  function _extraerInstanceID(req) {
+    const aParams = req.params ?? [];
+
+    // Caso 1: params[0] es objeto con propiedad instanceID (navegación OData)
+    if (aParams[0]?.instanceID) return aParams[0].instanceID;
+
+    // Caso 2: params[0] es string directo
+    if (typeof aParams[0] === "string") return aParams[0];
+
+    // Caso 3: viene como filtro en el query (Fiori Elements en algunos escenarios)
+    const sFromQuery = req.query?.SELECT?.from?.ref?.[0]?.where?.find?.(
+      w => w?.ref?.[0] === "instanceID"
+    )?.val;
+
+    return sFromQuery ?? null;
+  }
+
+  /**
+   * Obtiene los proveedores beneficiarios de la propuesta desde CPI.
+   * Delega a cpi-client para respetar la separación de capas.
+   * Origen legado: Detail.controller.js → getProveedoresInfo()
+   *
+   * @param {object} propuesta - Contexto BPA con numeroPropuesta, sociedad, fechaPropuestaPago
+   * @returns {Promise<Array>} Lista de proveedores para la composición Proveedor
+   */
+  async function _obtenerProveedores(propuesta) {
+    return cpiInfra.getProveedores(propuesta);
+  }
+
+  /**
+   * Obtiene los documentos adjuntos de la propuesta desde HANA vía CPI.
+   * Delega a cpi-client para respetar la separación de capas.
+   * Origen legado: Detail.controller.js → getPPAdjuntos()
+   *
+   * @param {object} propuesta - Contexto BPA con numeroPropuesta, sociedad, fechaPropuestaPago
+   * @returns {Promise<Array>} Lista de adjuntos para la composición Adjunto
+   */
+  async function _obtenerAdjuntos(propuesta) {
+    return cpiInfra.getAdjuntos(propuesta);
+  }
+
+  /**
+   * Obtiene el historial de aprobaciones de la propuesta desde HANA vía CPI.
+   * Delega a cpi-client para respetar la separación de capas.
+   * Origen legado: Detail.controller.js → getPropuestaPago() expand Aprobadores
+   *
+   * @param {object} propuesta - Contexto BPA con numeroPropuesta, sociedad, fechaPropuestaPago
+   * @returns {Promise<Array>} Lista de aprobadores para la composición Aprobador
+   */
+  async function _obtenerAprobadores(propuesta) {
+    return cpiInfra.getAprobadores(propuesta);
+  }
+
+  /**
+   * Parsea "dd-MM-yyyy" (formato del contexto BPA) a objeto Date JavaScript.
+   * Necesaria para claves datetime de SAP Gateway: Laufd=datetime'yyyy-MM-ddT...'
+   *
+   * @param {string} sFecha - Fecha en formato "dd-MM-yyyy" (ej: "20-05-2026")
+   * @returns {Date} Objeto Date en hora cero UTC
+   */
+  function _parseFechaPP(sFecha) {
+    if (!sFecha) return new Date();
+    const [dd, mm, yyyy] = sFecha.split("-");
+    return new Date(`${yyyy}-${mm}-${dd}T00:00:00.000Z`);
+  }
 
 /**
  * Mock de lista de tareas para el List Report cuando BPA no está disponible.

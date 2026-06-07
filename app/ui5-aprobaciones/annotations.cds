@@ -22,23 +22,19 @@ annotate PagosService.TareasInbox with @(
   },
 
   // ── Filtros del List Report ───────────────────────────────────────
-  UI.SelectionFields: [
-    sociedad, fechaPropuestaPago, banco, modalidadPP, viaPago, analista
-  ],
+  // UI.SelectionFields: [
+    /*sociedad, fechaPropuestaPago, banco, modalidadPP, viaPago, analista*/
+  // ],
 
   // ── Columnas del List Report ──────────────────────────────────────
-  // Los flags booleanos se agregan con ![@UI.Hidden]:true para que
-  // queden en el $select y el header de la Object Page pueda evaluarlos.
-  // Sin esto, visible:"{tieneRevisor}" evalúa siempre false porque el
-  // caché del List Report no incluye esos campos.
   UI.LineItem: [
-    { $Type: 'UI.DataField', Value: tituloTarea,        Label: 'Propuesta' },
-    { $Type: 'UI.DataField', Value: importe,            Label: 'Importe'   },
-    { $Type: 'UI.DataField', Value: moneda,             Label: 'Moneda'    },
-    { $Type: 'UI.DataField', Value: banco,              Label: 'Banco'     },
-    { $Type: 'UI.DataField', Value: viaPago,            Label: 'Vía Pago'  },
-    { $Type: 'UI.DataField', Value: fechaPropuestaPago, Label: 'Fecha PP'  },
-    { $Type: 'UI.DataField', Value: analista,           Label: 'Analista'  },
+    { $Type: 'UI.DataField', Value: tituloTarea,        Label: 'Propuesta' , ![@UI.Importance]: #High },
+    { $Type: 'UI.DataField', Value: importe,            Label: 'Importe' , ![@UI.Importance]: #High },
+    { $Type: 'UI.DataField', Value: moneda,             Label: 'Moneda' , ![@UI.Importance]: #High },
+    // { $Type: 'UI.DataField', Value: banco,              Label: 'Banco' ,![@UI.Importance]: #High    },
+    // { $Type: 'UI.DataField', Value: viaPago,            Label: 'Vía Pago' ,![@UI.Importance]: #High },
+    { $Type: 'UI.DataField', Value: fechaPropuestaPago, Label: 'Fecha PP' , ![@UI.Importance]: #High },
+    // { $Type: 'UI.DataField', Value: analista,           Label: 'Analista' , ![@UI.Importance]: #High },
     // Flags de rol — ocultos en la tabla pero incluidos en $select
     { $Type: 'UI.DataField', Value: tieneAnalista,       ![@UI.Hidden]: true },
     { $Type: 'UI.DataField', Value: estaConforme,        ![@UI.Hidden]: true },
@@ -101,6 +97,125 @@ annotate PagosService.TareasInbox with @(
     { $Type: 'UI.ReferenceFacet', ID: 'FacetProveedores', Label: 'Proveedores', Target: 'proveedores/@UI.LineItem' },
     { $Type: 'UI.ReferenceFacet', ID: 'FacetAdjuntos',    Label: 'Adjuntos',    Target: 'adjuntos/@UI.LineItem'    },
     { $Type: 'UI.ReferenceFacet', ID: 'FacetAprobadores', Label: 'Aprobadores', Target: 'aprobadores/@UI.LineItem' }
+  ],
+
+  // ── Botones de acción en la barra de la Object Page ───────────────
+  //
+  // UI.Identification coloca los DataFieldForAction en la toolbar superior
+  // de la Object Page (junto al título). Es la ubicación estándar para
+  // acciones de negocio en Fiori Elements con unbound actions de servicio CAP.
+  //
+  // ORDEN DE DECLARACIÓN = orden visual en la toolbar (izquierda → derecha).
+  //
+  // VISIBILIDAD:
+  //   Las unbound actions de servicio CAP no soportan @Core.OperationAvailable
+  //   con referencia dinámica a campos de entidad (solo aplica a bound actions).
+  //   La visibilidad condicional (estaConforme, puedeAnular, etc.) se implementa
+  //   mediante la propiedad ![@UI.Hidden] con expresión sobre los flags de TareasInbox
+  //   que ya están en el $select gracias al UI.LineItem oculto de arriba.
+  UI.Identification: [
+
+    // ── Analista Tesorería (tieneAnalista = true) ──────────────────
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.enviarSupervisorOCaja',
+      Label          : 'Enviar',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'tieneAnalista' } } }
+    },
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.compensar',
+      Label          : 'Compensar',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'tieneAnalista' } } }
+    },
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.cerrarPorObservacion',
+      Label          : 'Cerrar Obs.',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'tieneAnalista' } } }
+    },
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.eliminarDoc',
+      Label          : 'Eliminar Doc.',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'tieneAnalista' } } }
+    },
+
+    // ── Supervisor (estaConforme = true) ──────────────────────────
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.supervisorAprobar',
+      Label          : 'Aprobar PP',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'estaConforme' } } }
+    },
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.supervisorObservar',
+      Label          : 'Observar',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'estaConforme' } } }
+    },
+    // Terminar flujo: estaConforme AND estaTerminado → flag pre-calculado puedeTerminarFlujo
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.supervisorTerminarFlujo',
+      Label          : 'Terminar Flujo',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'puedeTerminarFlujo' } } }
+    },
+    // Anular: estaConforme AND estaAnulado → flag pre-calculado puedeAnular
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.supervisorAnular',
+      Label          : 'Anular',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'puedeAnular' } } }
+    },
+
+    // ── Revisor (tieneRevisor = true) ─────────────────────────────
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.revisorAprobar',
+      Label          : 'Aprobar PP',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'tieneRevisor' } } }
+    },
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.revisorObservar',
+      Label          : 'Observar',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'tieneRevisor' } } }
+    },
+
+    // ── Apoderado (estaAprobado = true) ───────────────────────────
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.apoderadoFirmar',
+      Label          : 'Firmar',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'estaAprobado' } } }
+    },
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.apoderadoObservar',
+      Label          : 'Observar',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'estaAprobado' } } }
+    },
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.redirigirApoderado',
+      Label          : 'Redirigir',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'estaAprobado' } } }
+    },
+
+    // ── Caja (esCaja = true) ──────────────────────────────────────
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.cajaConfirmarPago',
+      Label          : 'Confirmar Pago',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'esCaja' } } }
+    },
+    {
+      $Type          : 'UI.DataFieldForAction',
+      Action         : 'PagosService.cajaObservar',
+      Label          : 'Observar',
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'esCaja' } } }
+    }
   ]
 );
 
@@ -129,6 +244,9 @@ annotate PagosService.TareasInbox with {
 }
 
 // ── Acciones — OperationAvailable ────────────────────────────────
+// Para unbound actions de servicio, el valor debe ser true (estático).
+// La visibilidad condicional real se controla por ![@UI.Hidden] en
+// UI.Identification arriba, usando los flags booleanos del $select.
 annotate PagosService.enviarSupervisorOCaja   with @Core.OperationAvailable: true;
 annotate PagosService.compensar               with @Core.OperationAvailable: true;
 annotate PagosService.cerrarPorObservacion    with @Core.OperationAvailable: true;

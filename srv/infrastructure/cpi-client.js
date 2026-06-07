@@ -187,9 +187,77 @@ function buildApoRegPayload(pp, userSAP, iContadorFirma) {
   };
 }
 
+/**
+ * Obtiene los proveedores beneficiarios de la propuesta.
+ * Origen legado: Detail.controller.js → getProveedoresInfo()
+ */
+async function getProveedores(propuesta) {
+  const cpiSvc = await cds.connect.to("CPI_H2H");
+  const respuesta = await cpiSvc.get("/proveedores", {
+    NroPP   : propuesta.numeroPropuesta,
+    FechaPP : propuesta.fechaPropuestaPago,
+    Sociedad: propuesta.sociedad
+  });
+  return (Array.isArray(respuesta) ? respuesta : (respuesta?.proveedores ?? []))
+    .map((item, idx) => ({
+      proveedorId: String(idx + 1).padStart(3, "0"),
+      ruc        : item.RUC      ?? item.ruc      ?? "",
+      nombre     : item.Nombre   ?? item.nombre   ?? "",
+      glosa      : item.Glosa    ?? item.glosa    ?? "",
+      monto      : parseFloat(item.Monto ?? item.monto ?? "0"),
+      facturas   : item.Facturas ?? item.facturas ?? ""
+    }));
+}
+
+/**
+ * Obtiene los adjuntos de la propuesta desde HANA vía CPI.
+ * Origen legado: Detail.controller.js → getPPAdjuntos()
+ */
+async function getAdjuntos(propuesta) {
+  const cpiSvc = await cds.connect.to("CPI_H2H");
+  const respuesta = await cpiSvc.get("/adjuntos", {
+    NroPP   : propuesta.numeroPropuesta,
+    FechaPP : propuesta.fechaPropuestaPago,
+    Sociedad: propuesta.sociedad
+  });
+  return (Array.isArray(respuesta) ? respuesta : (respuesta?.adjuntos ?? []))
+    .map(item => ({
+      adjuntoId          : item.id                 ?? item.AdjuntoId          ?? cds.utils.uuid(),
+      nombre             : item.nombre             ?? item.Nombre             ?? "",
+      tipoAdjunto        : item.tipoAdjunto        ?? item.TipoAdjunto        ?? "",
+      activo             : item.activo             ?? item.Activo             ?? true,
+      docServiceObjectID : item.docServiceObjectID ?? item.DocServiceObjectID ?? ""
+    }));
+}
+
+/**
+ * Obtiene el historial de aprobaciones desde HANA vía CPI.
+ * Origen legado: Detail.controller.js → getPropuestaPago() expand Aprobadores
+ */
+async function getAprobadores(propuesta) {
+  const cpiSvc = await cds.connect.to("CPI_H2H");
+  const respuesta = await cpiSvc.get("/aprobadores", {
+    NroPP   : propuesta.numeroPropuesta,
+    FechaPP : propuesta.fechaPropuestaPago,
+    Sociedad: propuesta.sociedad
+  });
+  return (Array.isArray(respuesta) ? respuesta : (respuesta?.aprobadores ?? []))
+    .map((item, idx) => ({
+      aprobadorId: String(idx + 1).padStart(3, "0"),
+      usuario    : item.usuario     ?? item.Usuario    ?? "",
+      rol        : item.rol         ?? item.Rol        ?? "",
+      fechaAprob : item.fechaAprob  ?? item.FechaAprob ?? null,
+      aprobado   : item.aprobado    ?? item.Aprobado   ?? false,
+      observacion: item.observacion ?? item.Observacion ?? ""
+    }));
+}
+
 module.exports = {
   registrarAprobacionSAP,
   registrarObservacionSAP,
   buildObsPayload,
   buildApoRegPayload,
+  getProveedores,
+  getAdjuntos,
+  getAprobadores
 };

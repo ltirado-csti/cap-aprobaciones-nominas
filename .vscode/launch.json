@@ -1,0 +1,134 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // ── CAP Backend — modo local (sin BPA/CPI reales) ──────────────────────
+      // Equivale a: npm run watch (sin --profile hybrid)
+      // Permite debuggear handlers de pagos-service.js con datos mock.
+      // Breakpoints activos en: srv/pagos-service.js, srv/domain/*.js,
+      //                         srv/infrastructure/*.js
+      "name": "CAP: watch (local + mock)",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "cds",
+        "watch"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": [
+        "<node_internals>/**"
+      ],
+      "env": {
+        "NODE_ENV": "development"
+      },
+      "restart": true,
+      "sourceMaps": true
+    },
+    {
+      // ── CAP Backend — modo híbrido (BPA + CPI reales vía Destination) ──────
+      // Equivale a: npm run watch:hybrid
+      // Permite debuggear la conectividad real con BPA y CPI en BTP.
+      // Requiere: cds bind ejecutado previamente (bind:dest, bind:bpa)
+      "name": "CAP: watch:hybrid (BPA + CPI reales)",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "cds",
+        "watch",
+        "--profile",
+        "hybrid"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": [
+        "<node_internals>/**"
+      ],
+      "env": {
+        "NODE_ENV": "development"
+      },
+      "restart": true,
+      "sourceMaps": true
+    },
+    {
+      // ── UI5 Frontend — transpila TypeScript en caliente ────────────────────
+      // Equivale a: cd app/ui5-aprobaciones && npx ui5 serve
+      // Requiere que "CAP: watch:hybrid" esté corriendo en otra terminal
+      // para que el proxy /nomina → localhost:4004 funcione.
+      "name": "UI5: serve (transpile TS)",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "ui5",
+        "serve"
+      ],
+      "cwd": "${workspaceFolder}/app/ui5-aprobaciones",
+      "console": "integratedTerminal",
+      "skipFiles": [
+        "<node_internals>/**"
+      ],
+      "sourceMaps": true
+    },
+    {
+      // ── Compound: CAP hybrid + UI5 juntos ─────────────────────────────────
+      // Lanza ambos procesos en paralelo con un solo F5.
+      // CAP en puerto 4004, UI5 en puerto 8080.
+      // Breakpoints activos en srv/ (Node.js) y webapp/ (browser via sourceMap).
+      "name": "CAP + UI5: watch:hybrid completo",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "cds",
+        "watch",
+        "--profile",
+        "hybrid"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": [
+        "<node_internals>/**"
+      ],
+      "env": {
+        "NODE_ENV": "development"
+      },
+      "restart": true,
+      "sourceMaps": true,
+      "preLaunchTask": "ui5:serve"
+    }
+  ],
+  "compounds": [
+    {
+      // ── Compound recomendado para desarrollo diario ────────────────────────
+      // F5 lanza: CAP hybrid + UI5 serve en paralelo
+      "name": "Full Stack: CAP hybrid + UI5",
+      "configurations": [
+        "CAP: watch:hybrid (BPA + CPI reales)",
+        "UI5: serve (transpile TS)"
+      ],
+      "stopAll": true,
+      "presentation": {
+        "hidden": false,
+        "group": "Full Stack",
+        "order": 1
+      }
+    },
+    {
+      // ── Compound para desarrollo offline (sin BTP) ─────────────────────────
+      "name": "Full Stack: CAP local + UI5",
+      "configurations": [
+        "CAP: watch (local + mock)",
+        "UI5: serve (transpile TS)"
+      ],
+      "stopAll": true,
+      "presentation": {
+        "hidden": false,
+        "group": "Full Stack",
+        "order": 2
+      }
+    }
+  ]
+}

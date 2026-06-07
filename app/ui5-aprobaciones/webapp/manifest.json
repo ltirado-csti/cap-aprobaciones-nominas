@@ -108,8 +108,9 @@
           "options": {
             "settings": {
               "entitySet": "TareasInbox",
-              "variantManagement": "Page",
+              "variantManagement": "None",
               "initialLoad": true,
+              "hideFilterBar": true,
               "navigation": {
                 "TareasInbox": {
                   "detail": {
