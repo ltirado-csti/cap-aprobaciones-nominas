@@ -141,102 +141,6 @@
             "settings": {
               "entitySet": "TareasInbox",
               "editableHeaderContent": false,
-              "content": {
-                "header": {
-                  "actions": {
-                    "enviarSupervisorOCaja": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onEnviarSupervisorOCaja",
-                      "enabled": "{tieneAnalista}",
-                      "visible": "{tieneAnalista}",
-                      "text": "Enviar Super/Caja"
-                    },
-                    "compensar": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onCompensar",
-                      "enabled": "{tieneAnalista}",
-                      "visible": "{tieneAnalista}",
-                      "text": "Compensar"
-                    },
-                    "cerrarPorObservacion": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onCerrarPorObservacion",
-                      "enabled": "{tieneAnalista}",
-                      "visible": "{tieneAnalista}",
-                      "text": "Cerrar por Obs."
-                    },
-                    "eliminarDoc": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onEliminarDoc",
-                      "enabled": "{tieneAnalista}",
-                      "visible": "{tieneAnalista}",
-                      "text": "Eliminar Doc."
-                    },
-                    "supervisorAprobar": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onSupervisorAprobar",
-                      "enabled": "{estaConforme}",
-                      "visible": "{estaConforme}",
-                      "text": "Aprobar PP"
-                    },
-                    "supervisorTerminarFlujo": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onSupervisorTerminarFlujo",
-                      "enabled": "{puedeTerminarFlujo}",
-                      "visible": "{puedeTerminarFlujo}",
-                      "text": "Terminar Flujo"
-                    },
-                    "supervisorObservar": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onSupervisorObservar",
-                      "enabled": "{estaConforme}",
-                      "visible": "{estaConforme}",
-                      "text": "Observar"
-                    },
-                    "supervisorAnular": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onSupervisorAnular",
-                      "enabled": "{puedeAnular}",
-                      "visible": "{puedeAnular}",
-                      "text": "Anular"
-                    },
-                    "revisorAprobar": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onRevisorAprobar",
-                      "enabled": "{tieneRevisor}",
-                      "visible": "{tieneRevisor}",
-                      "text": "Aprobar PP"
-                    },
-                    "revisorObservar": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onRevisorObservar",
-                      "enabled": "{tieneRevisor}",
-                      "visible": "{tieneRevisor}",
-                      "text": "Observar"
-                    },
-                    "apoderadoFirmar": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onApoderadoFirmar",
-                      "enabled": "{estaAprobado}",
-                      "visible": "{estaAprobado}",
-                      "text": "Firmar"
-                    },
-                    "apoderadoObservar": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onApoderadoObservar",
-                      "enabled": "{estaAprobado}",
-                      "visible": "{estaAprobado}",
-                      "text": "Observar"
-                    },
-                    "redirigirApoderado": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onRedirigirApoderado",
-                      "enabled": "{estaAprobado}",
-                      "visible": "{estaAprobado}",
-                      "text": "Redirigir Apoderado"
-                    },
-                    "cajaConfirmarPago": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onCajaConfirmarPago",
-                      "enabled": "{esCaja}",
-                      "visible": "{esCaja}",
-                      "text": "Confirmar Pago"
-                    },
-                    "cajaObservar": {
-                      "press": ".extension.centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler.onCajaObservar",
-                      "enabled": "{esCaja}",
-                      "visible": "{esCaja}",
-                      "text": "Observar"
-                    }
-                  }
-                }
-              },
               "controlConfiguration": {
                 "proveedores/@com.sap.vocabularies.UI.v1.LineItem": {
                   "tableSettings": {
@@ -258,19 +162,17 @@
           }
         }
       }
-    },
-    "extends": {
-      "extensions": {
-        "sap.ui.controllerExtensions": {
-          "sap.fe.templates.ObjectPage.ObjectPageController": {
-            "controllerName": "centria.h2hpp.aprobaciones.ui5aprobaciones.ext.AccionesHandler"
-          }
-        }
-      }
     }
   },
   "sap.fiori": {
     "registrationIds": [],
     "archeType": "transactional"
+  },
+  "sap.fe": {
+    "app": {
+      "share": {
+        "showSendEmail": false
+      }
+    }
   }
 }

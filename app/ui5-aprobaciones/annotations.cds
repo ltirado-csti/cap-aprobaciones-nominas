@@ -36,10 +36,10 @@ annotate PagosService.TareasInbox with @(
     { $Type: 'UI.DataField', Value: fechaPropuestaPago, Label: 'Fecha PP' , ![@UI.Importance]: #High },
     // { $Type: 'UI.DataField', Value: analista,           Label: 'Analista' , ![@UI.Importance]: #High },
     // Flags de rol — ocultos en la tabla pero incluidos en $select
-    { $Type: 'UI.DataField', Value: tieneAnalista,       ![@UI.Hidden]: true },
-    { $Type: 'UI.DataField', Value: estaConforme,        ![@UI.Hidden]: true },
-    { $Type: 'UI.DataField', Value: tieneRevisor,        ![@UI.Hidden]: true },
-    { $Type: 'UI.DataField', Value: estaAprobado,        ![@UI.Hidden]: true },
+    { $Type: 'UI.DataField', Value: esAnalista,          ![@UI.Hidden]: true },
+    { $Type: 'UI.DataField', Value: esCoordinador,       ![@UI.Hidden]: true },
+    { $Type: 'UI.DataField', Value: esLiberador,         ![@UI.Hidden]: true },
+    { $Type: 'UI.DataField', Value: esApoderado,         ![@UI.Hidden]: true },
     { $Type: 'UI.DataField', Value: esCaja,              ![@UI.Hidden]: true },
     { $Type: 'UI.DataField', Value: puedeTerminarFlujo,  ![@UI.Hidden]: true },
     { $Type: 'UI.DataField', Value: puedeAnular,         ![@UI.Hidden]: true }
@@ -110,58 +110,58 @@ annotate PagosService.TareasInbox with @(
   // VISIBILIDAD:
   //   Las unbound actions de servicio CAP no soportan @Core.OperationAvailable
   //   con referencia dinámica a campos de entidad (solo aplica a bound actions).
-  //   La visibilidad condicional (estaConforme, puedeAnular, etc.) se implementa
+  //   La visibilidad condicional (esCoordinador, puedeAnular, etc.) se implementa
   //   mediante la propiedad ![@UI.Hidden] con expresión sobre los flags de TareasInbox
   //   que ya están en el $select gracias al UI.LineItem oculto de arriba.
   UI.Identification: [
 
-    // ── Analista Tesorería (tieneAnalista = true) ──────────────────
+    // ── Analista Tesorería (esAnalista = true) ─────────────────────
     {
       $Type          : 'UI.DataFieldForAction',
       Action         : 'PagosService.enviarSupervisorOCaja',
       Label          : 'Enviar',
-      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'tieneAnalista' } } }
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'esAnalista' } } }
     },
     {
       $Type          : 'UI.DataFieldForAction',
       Action         : 'PagosService.compensar',
       Label          : 'Compensar',
-      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'tieneAnalista' } } }
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'esAnalista' } } }
     },
     {
       $Type          : 'UI.DataFieldForAction',
       Action         : 'PagosService.cerrarPorObservacion',
       Label          : 'Cerrar Obs.',
-      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'tieneAnalista' } } }
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'esAnalista' } } }
     },
     {
       $Type          : 'UI.DataFieldForAction',
       Action         : 'PagosService.eliminarDoc',
       Label          : 'Eliminar Doc.',
-      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'tieneAnalista' } } }
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'esAnalista' } } }
     },
 
-    // ── Supervisor (estaConforme = true) ──────────────────────────
+    // ── Coordinador (esCoordinador = true) ────────────────────────
     {
       $Type          : 'UI.DataFieldForAction',
       Action         : 'PagosService.supervisorAprobar',
       Label          : 'Aprobar PP',
-      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'estaConforme' } } }
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'esCoordinador' } } }
     },
     {
       $Type          : 'UI.DataFieldForAction',
       Action         : 'PagosService.supervisorObservar',
       Label          : 'Observar',
-      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'estaConforme' } } }
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'esCoordinador' } } }
     },
-    // Terminar flujo: estaConforme AND estaTerminado → flag pre-calculado puedeTerminarFlujo
+    // Terminar flujo: esCoordinador AND estaTerminado → flag pre-calculado puedeTerminarFlujo
     {
       $Type          : 'UI.DataFieldForAction',
       Action         : 'PagosService.supervisorTerminarFlujo',
       Label          : 'Terminar Flujo',
       ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'puedeTerminarFlujo' } } }
     },
-    // Anular: estaConforme AND estaAnulado → flag pre-calculado puedeAnular
+    // Anular: esCoordinador AND estaAnulado → flag pre-calculado puedeAnular
     {
       $Type          : 'UI.DataFieldForAction',
       Action         : 'PagosService.supervisorAnular',
@@ -169,38 +169,38 @@ annotate PagosService.TareasInbox with @(
       ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'puedeAnular' } } }
     },
 
-    // ── Revisor (tieneRevisor = true) ─────────────────────────────
+    // ── Liberador (esLiberador = true) ────────────────────────────
     {
       $Type          : 'UI.DataFieldForAction',
       Action         : 'PagosService.revisorAprobar',
       Label          : 'Aprobar PP',
-      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'tieneRevisor' } } }
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'esLiberador' } } }
     },
     {
       $Type          : 'UI.DataFieldForAction',
       Action         : 'PagosService.revisorObservar',
       Label          : 'Observar',
-      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'tieneRevisor' } } }
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'esLiberador' } } }
     },
 
-    // ── Apoderado (estaAprobado = true) ───────────────────────────
+    // ── Apoderado (esApoderado = true) ────────────────────────────
     {
       $Type          : 'UI.DataFieldForAction',
       Action         : 'PagosService.apoderadoFirmar',
       Label          : 'Firmar',
-      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'estaAprobado' } } }
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'esApoderado' } } }
     },
     {
       $Type          : 'UI.DataFieldForAction',
       Action         : 'PagosService.apoderadoObservar',
       Label          : 'Observar',
-      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'estaAprobado' } } }
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'esApoderado' } } }
     },
     {
       $Type          : 'UI.DataFieldForAction',
       Action         : 'PagosService.redirigirApoderado',
       Label          : 'Redirigir',
-      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'estaAprobado' } } }
+      ![@UI.Hidden]  : { $edmJson: { $Not: { $Path: 'esApoderado' } } }
     },
 
     // ── Caja (esCaja = true) ──────────────────────────────────────
@@ -243,25 +243,11 @@ annotate PagosService.TareasInbox with {
   urlPDF                @Core.IsURL @title: 'URL PDF';
 }
 
-// ── Acciones — OperationAvailable ────────────────────────────────
-// Para unbound actions de servicio, el valor debe ser true (estático).
-// La visibilidad condicional real se controla por ![@UI.Hidden] en
-// UI.Identification arriba, usando los flags booleanos del $select.
-annotate PagosService.enviarSupervisorOCaja   with @Core.OperationAvailable: true;
-annotate PagosService.compensar               with @Core.OperationAvailable: true;
-annotate PagosService.cerrarPorObservacion    with @Core.OperationAvailable: true;
-annotate PagosService.eliminarDoc             with @Core.OperationAvailable: true;
-annotate PagosService.supervisorAprobar       with @Core.OperationAvailable: true;
-annotate PagosService.supervisorTerminarFlujo with @Core.OperationAvailable: true;
-annotate PagosService.supervisorObservar      with @Core.OperationAvailable: true;
-annotate PagosService.supervisorAnular        with @Core.OperationAvailable: true;
-annotate PagosService.revisorAprobar          with @Core.OperationAvailable: true;
-annotate PagosService.revisorObservar         with @Core.OperationAvailable: true;
-annotate PagosService.apoderadoFirmar         with @Core.OperationAvailable: true;
-annotate PagosService.apoderadoObservar       with @Core.OperationAvailable: true;
-annotate PagosService.redirigirApoderado      with @Core.OperationAvailable: true;
-annotate PagosService.cajaConfirmarPago       with @Core.OperationAvailable: true;
-annotate PagosService.cajaObservar            with @Core.OperationAvailable: true;
+// ── Acciones — visibilidad ───────────────────────────────────────
+// Migración a bound actions: la visibilidad por rol se controla con
+// ![@UI.Hidden] (path sobre los flags de TareasInbox) en UI.Identification.
+// Con acciones bound, Fiori Elements V4 sí pasa el contexto de la Object
+// Page y las expresiones de path se evalúan por instancia.
 
 // ── Composiciones ─────────────────────────────────────────────────
 annotate PagosService.Proveedor with @(
