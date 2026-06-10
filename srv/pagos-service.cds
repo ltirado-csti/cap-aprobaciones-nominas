@@ -60,20 +60,15 @@ type PropuestaNomina {
   contadorFirma         : Integer;
 }
 
-// ── Tipo usuario autenticado ──────────────────────────────────────
-type UsuarioActual {
-  nombre : String;
-}
-
 // ── Tipo constantes de negocio ────────────────────────────────────
 type ConstantesRpta {
-  aSociedadesRevision : array of String;
-  aValidarViaPago     : array of String;
-  aAprobarViaPago     : array of String;
-  aSociedadesTermina  : array of String;
-  oTesoreros          : LargeString;
-  sDocumentUrl        : String;
-  sDocumentUrlTasa    : String;
+  sociedadesRevision : array of String;
+  validarViaPago     : array of String;
+  aprobarViaPago     : array of String;
+  sociedadesTermina  : array of String;
+  tesoreros          : LargeString;
+  documentUrl        : String;
+  documentUrlTasa    : String;
 }
 
 // ── Tipo resultado de acción ──────────────────────────────────────
@@ -184,26 +179,132 @@ service PagosService {
     existeDocumento          : String(10);
     indicadorPagoAdelanto    : String(1);
 
-    // Flags de visibilidad por rol — controlan botones en Bloque 3
-    tieneAnalista            : Boolean;
-    estaConforme             : Boolean;
-    tieneRevisor             : Boolean;
-    estaAprobado             : Boolean;
+    // Flags de visibilidad por rol — calculados desde el taskDefinitionId (activityId)
+    // de la tarea BPA vía perfiles.calcularFlagsRol(). Reemplazan a los flags
+    // legado del contexto (tieneAnalista/estaConforme/tieneRevisor/estaAprobado/esCaja).
+    // esAnalista y esCaja son siempre false: esos roles no tienen user task en BPA.
+    esAnalista               : Boolean;
+    esCoordinador            : Boolean;
+    esApoderado              : Boolean;
+    esLiberador              : Boolean;
     esCaja                   : Boolean;
+
+    // Flags de estado de la propuesta — sí provienen del contexto BPA
     estaTerminado            : Boolean;
     estaAnulado              : Boolean;
 
-    // Campos calculados por el handler — visibilidad doble del Supervisor
-    puedeTerminarFlujo : Boolean; // true cuando estaConforme AND estaTerminado
-    puedeAnular        : Boolean; // true cuando estaConforme AND estaAnulado
+    // Campos calculados por el handler — visibilidad doble del Coordinador
+    puedeTerminarFlujo : Boolean; // true cuando esCoordinador AND estaTerminado
+    puedeAnular        : Boolean; // true cuando esCoordinador AND estaAnulado
 
     // Composiciones — Facets 2, 3, 4 de la Object Page
     // Cargadas solo en READ por instanceID (no en el listado)
     proveedores              : Composition of many Proveedor;
     adjuntos                 : Composition of many Adjunto;
     aprobadores              : Composition of many Aprobador;
-    
 
+
+  }
+  // ── BOUND ACTIONS DE TareasInbox ────────────────────────────────
+  //
+  // Migración a bound actions (bloque Migración Bound Actions):
+  //   - En Fiori Elements V4 el contexto de la Object Page solo se pasa a
+  //     las acciones BOUND; por eso la visibilidad dinámica (UI.Hidden con
+  //     path sobre los flags de rol) requiere que las acciones sean bound.
+  //   - El cliente ya NO envía propuesta/usuario/taskId: el handler los
+  //     deriva del instanceID de la instancia (clave bound), del contexto
+  //     BPA (fuente autoritativa) y de XSUAA (req.user). Esto además evita
+  //     manipulación de datos desde el cliente.
+  //   - Los parámetros restantes (comentario) generan el dialog automático
+  //     de Fiori Elements (Tarea 3.6).
+  actions {
+
+    // ── Analista Tesorería (esAnalista) ──────────────────────────
+    // Tarea 3.1 — Enviar al Supervisor o Caja según viaPago (W → EN_CAJA)
+    @Common.Label: 'Enviar Super/Caja'
+    action enviarSupervisorOCaja() returns ResultadoAccion;
+
+    // Tarea 3.1 — Compensar la propuesta con documento SAP
+    @Common.Label: 'Compensar'
+    action compensar() returns ResultadoAccion;
+
+    // Tarea 3.1 — Cerrar la propuesta por observación del supervisor
+    @Common.Label: 'Cerrar por obs.'
+    action cerrarPorObservacion(
+      @Common.Label: 'Comentario'
+      comentario : String @mandatory  // dialog automático de Fiori Elements
+    ) returns ResultadoAccion;
+
+    // Tarea 3.1 — Eliminar el documento generado
+    @Common.Label: 'Eliminar Doc.'
+    action eliminarDoc() returns ResultadoAccion;
+
+    // ── Coordinador (esCoordinador) ──────────────────────────────
+    // Tarea 3.2 — Aprobar la propuesta y enrutar al siguiente paso
+    @Common.Label: 'Aprobar PP'
+    action supervisorAprobar() returns ResultadoAccion;
+
+    // Tarea 3.2 — Terminar el flujo completo (visibilidad: puedeTerminarFlujo)
+    @Common.Label: 'Terminar flujo'
+    action supervisorTerminarFlujo() returns ResultadoAccion;
+
+    // Tarea 3.2 — Observar la propuesta (devuelve al Analista)
+    @Common.Label: 'Observar'
+    action supervisorObservar(
+      @Common.Label: 'Comentario'
+      comentario : String @mandatory
+    ) returns ResultadoAccion;
+
+    // Tarea 3.2 — Anular la propuesta (visibilidad: puedeAnular)
+    @Common.Label: 'Anular'
+    action supervisorAnular(
+      @Common.Label: 'Comentario'
+      comentario : String @mandatory
+    ) returns ResultadoAccion;
+
+    // ── Revisor/Liberador (esLiberador) ──────────────────────────
+    // Tarea 3.3 — Aprobar en etapa de revisión (REVISION → EN_FIRMA)
+    @Common.Label: 'Aprobar PP'
+    action revisorAprobar() returns ResultadoAccion;
+
+    // Tarea 3.3 — Observar en etapa de revisión
+    @Common.Label: 'Observar'
+    action revisorObservar(
+      @Common.Label: 'Comentario'
+      comentario : String @mandatory
+    ) returns ResultadoAccion;
+
+    // ── Apoderado (esApoderado) ──────────────────────────────────
+    // Tarea 3.4 — Firmar (F1/F2 según contadorFirma del contexto)
+    @Common.Label: 'Firmar'
+    action apoderadoFirmar() returns ResultadoAccion;
+
+    // Tarea 3.4 — Observar en etapa de firma
+    @Common.Label: 'Observar'
+    action apoderadoObservar(
+      @Common.Label: 'Comentario'
+      comentario : String @mandatory
+    ) returns ResultadoAccion;
+
+    // Tarea 3.4 — Redirigir a otro apoderado
+    // TODO(arquitecto): redirigirApoderado pendiente en el dominio
+    @Common.Label: 'Redirigir Apoderado'
+    action redirigirApoderado(
+      @Common.Label: 'Apoderado destino (email)'
+      comentario : String @mandatory  // email del nuevo apoderado
+    ) returns ResultadoAccion;
+
+    // ── Caja (esCaja) ────────────────────────────────────────────
+    // Tarea 3.5 — Confirmar el pago en caja (EN_CAJA → PAGADO)
+    @Common.Label: 'Confirmar Pago'
+    action cajaConfirmarPago() returns ResultadoAccion;
+
+    // Tarea 3.5 — Observar en etapa de caja
+    @Common.Label: 'Observar'
+    action cajaObservar(
+      @Common.Label: 'Comentario'
+      comentario : String @mandatory
+    ) returns ResultadoAccion;
   }
 
   // ── FUNCIONES Y ACCIONES ───────────────────────────────────────
@@ -211,188 +312,13 @@ service PagosService {
   @Common.Label: 'Obtener constantes de negocio'
   function obtenerConstantes() returns ConstantesRpta;
 
- // ── Tipo que representa al usuario autenticado en cada acción ─────────────────
-// Reemplaza el type CurrentUser del legado (PPOData.js → getCurrentUserApi())
-type UsuarioActual {
-  nombre : String; // email del usuario autenticado vía XSUAA
-}
-
-// ── Resultado estándar devuelto por todas las acciones ────────────────────────
-// Reemplaza AccionResult del legado (Detail.controller.js → _procesarRespuesta)
-type ResultadoAccion {
-  exitoso  : Boolean; // true si la acción completó sin errores
-  mensaje  : String;  // mensaje descriptivo para mostrar al usuario
-  estadoPP : String;  // nuevo estado de la propuesta tras la acción
-  taskId   : String;  // ID de la tarea BPA procesada
-}
-
-// ── ANALISTA TESORERÍA ────────────────────────────────────────────────────────
-// Origen legado: AnalistaTesoreria.js → generarBotones()
-// Flag de visibilidad: tieneAnalista (PropuestaNomina.json)
-
-  // Tarea 3.1 — Enviar al Supervisor o Caja según ViaPago
-  // Legado: botón ENVIAR_SUPER_CAJA
-  @Common.Label: 'Enviar Super/Caja'
-  action enviarSupervisorOCaja(
-    propuesta   : PropuestaNomina, // datos completos de la propuesta
-    usuario     : UsuarioActual,   // usuario que ejecuta la acción
-    taskId      : String,          // ID de la tarea BPA
-    constantes  : ConstantesRpta   // constantes de negocio (rutas, sociedades)
-  ) returns ResultadoAccion;
-
-  // Tarea 3.1 — Compensar la propuesta con documento SAP
-  // Legado: botón COMPENSAR
-  @Common.Label: 'Compensar'
-  action compensar(
-    propuesta   : PropuestaNomina,
-    usuario     : UsuarioActual,
-    taskId      : String
-  ) returns ResultadoAccion;
-
-  // Tarea 3.1 — Cerrar la propuesta por observación del supervisor
-  // Legado: botón CERRAR_OBS — requiere comentario obligatorio
-  @Common.Label: 'Cerrar por obs.'
-  action cerrarPorObservacion(
-    propuesta   : PropuestaNomina,
-    usuario     : UsuarioActual,
-    taskId      : String,
-    comentario  : String           // Tarea 3.6: Fiori Elements genera dialog automático
-  ) returns ResultadoAccion;
-
-  // Tarea 3.1 — Eliminar el documento generado
-  // Legado: botón ELIMINAR_DOC
-  @Common.Label: 'Eliminar Doc.'
-  action eliminarDoc(
-    propuesta   : PropuestaNomina,
-    usuario     : UsuarioActual,
-    taskId      : String
-  ) returns ResultadoAccion;
-
-// ── SUPERVISOR ────────────────────────────────────────────────────────────────
-// Origen legado: Supervisor.js → generarBotones()
-// Flag de visibilidad: estaConforme (PropuestaNomina.json)
-
-  // Tarea 3.2 — Aprobar la propuesta y enrutar al siguiente paso
-  // Legado: botón APROBAR_PP
-  @Common.Label: 'Aprobar PP'
-  action supervisorAprobar(
-    propuesta   : PropuestaNomina,
-    usuario     : UsuarioActual,
-    taskId      : String,
-    constantes  : ConstantesRpta
-  ) returns ResultadoAccion;
-
-  // Tarea 3.2 — Terminar el flujo completo (cancela la instancia BPA)
-  // Legado: botón TERMINAR_FLUJO — visibilidad doble: estaConforme AND estaTerminado
-  @Common.Label: 'Terminar flujo'
-  action supervisorTerminarFlujo(
-    propuesta   : PropuestaNomina,
-    usuario     : UsuarioActual,
-    taskId      : String,
-    constantes  : ConstantesRpta
-  ) returns ResultadoAccion;
-
-  // Tarea 3.2 — Observar la propuesta (devuelve al Analista)
-  // Legado: botón OBSERVAR — requiere comentario obligatorio
-  @Common.Label: 'Observar'
-  action supervisorObservar(
-    propuesta   : PropuestaNomina,
-    usuario     : UsuarioActual,
-    taskId      : String,
-    comentario  : String           // Tarea 3.6: dialog automático de Fiori Elements
-  ) returns ResultadoAccion;
-
-  // Tarea 3.2 — Anular la propuesta de pago
-  // Legado: botón ANULAR — visibilidad doble: estaConforme AND estaAnulado
-  @Common.Label: 'Anular'
-  action supervisorAnular(
-    propuesta   : PropuestaNomina,
-    usuario     : UsuarioActual,
-    taskId      : String,
-    comentario  : String           // Tarea 3.6: dialog automático obligatorio
-  ) returns ResultadoAccion;
-
-// ── REVISOR ───────────────────────────────────────────────────────────────────
-// Origen legado: Revisor.js → generarBotones()
-// Flag de visibilidad: tieneRevisor (PropuestaNomina.json)
-
-  // Tarea 3.3 — Aprobar la propuesta en etapa de revisión
-  // Legado: botón APROBAR_PP
-  @Common.Label: 'Aprobar PP'
-  action revisorAprobar(
-    propuesta   : PropuestaNomina,
-    usuario     : UsuarioActual,
-    taskId      : String
-  ) returns ResultadoAccion;
-
-  // Tarea 3.3 — Observar la propuesta en etapa de revisión
-  // Legado: botón OBSERVAR — requiere comentario obligatorio
-  @Common.Label: 'Observar'
-  action revisorObservar(
-    propuesta   : PropuestaNomina,
-    usuario     : UsuarioActual,
-    taskId      : String,
-    comentario  : String           // Tarea 3.6: dialog automático de Fiori Elements
-  ) returns ResultadoAccion;
-
-// ── APODERADO ─────────────────────────────────────────────────────────────────
-// Origen legado: Apoderado.js → generarBotones()
-// Flag de visibilidad: estaAprobado (PropuestaNomina.json)
-
-  // Tarea 3.4 — Firmar la propuesta (F1 o F2 según contadorFirma)
-  // Legado: botón APROBAR_PP (firma) — el handler decide F1/F2 internamente
-  @Common.Label: 'Firmar'
-  action apoderadoFirmar(
-    propuesta   : PropuestaNomina, // contiene contadorFirma para F1/F2
-    usuario     : UsuarioActual,
-    taskId      : String,
-    constantes  : ConstantesRpta
-  ) returns ResultadoAccion;
-
-  // Tarea 3.4 — Observar la propuesta en etapa de firma
-  // Legado: botón OBSERVAR — requiere comentario obligatorio
-  @Common.Label: 'Observar'
-  action apoderadoObservar(
-    propuesta   : PropuestaNomina,
-    usuario     : UsuarioActual,
-    taskId      : String,
-    comentario  : String           // Tarea 3.6: dialog automático de Fiori Elements
-  ) returns ResultadoAccion;
-
-  // Tarea 3.4 — Redirigir a otro apoderado
-  // Legado: botón REDIRIGIR_APODERADO
-  @Common.Label: 'Redirigir Apoderado'
-  action redirigirApoderado(
-    propuesta   : PropuestaNomina,
-    usuario     : UsuarioActual,
-    taskId      : String,
-    comentario  : String           // nuevo apoderado destino
-  ) returns ResultadoAccion;
-
-// ── CAJA ──────────────────────────────────────────────────────────────────────
-// Origen legado: Caja.js → generarBotones()
-// Flag de visibilidad: esCaja (PropuestaNomina.json)
-// El estado EN_CAJA es informativo — se muestra como campo estadoPP en el header,
-// NO como botón (Tarea 3.5)
-
-  // Tarea 3.5 — Confirmar el pago en caja (cierra el flujo)
-  // Legado: botón CONFIRMAR_PAGO
-  @Common.Label: 'Confirmar Pago'
-  action cajaConfirmarPago(
-    propuesta   : PropuestaNomina,
-    usuario     : UsuarioActual,
-    taskId      : String
-  ) returns ResultadoAccion;
-
-  // Tarea 3.5 — Observar en etapa de caja (devuelve al Analista)
-  // Legado: botón OBSERVAR — requiere comentario obligatorio
-  @Common.Label: 'Observar'
-  action cajaObservar(
-    propuesta   : PropuestaNomina,
-    usuario     : UsuarioActual,
-    taskId      : String,
-    comentario  : String           // Tarea 3.6: dialog automático de Fiori Elements
-  ) returns ResultadoAccion;
-
+  // ── Resultado estándar devuelto por todas las acciones ────────────────────────
+  // Reemplaza AccionResult del legado (Detail.controller.js → _procesarRespuesta)
+  type ResultadoAccion {
+    exitoso  : Boolean; // true si la acción completó sin errores
+    mensaje  : String;  // mensaje descriptivo para mostrar al usuario
+    estadoPP : String;  // nuevo estado de la propuesta tras la acción
+    taskId   : String;  // ID de la tarea BPA procesada
+  }
 
 }

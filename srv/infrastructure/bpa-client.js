@@ -11,10 +11,13 @@
  * Todos los endpoints usan el prefijo /v1 verificado en el JSON oficial.
  *
  * Métodos expuestos:
- *   getInboxTasks()              → GET  /v1/task-instances
- *   readContext(taskId)          → GET  /v1/task-instances/{id}/context
- *   completarTarea(...)          → PATCH /v1/task-instances/{id}
- *   cerrarFlujo(instanceId)      → PATCH /v1/workflow-instances/{id}
+ *   getInboxTasks()                       → GET   /v1/task-instances
+ *   obtenerTarea(taskId)                  → GET   /v1/task-instances/{id}
+ *   readContext(taskId)                   → GET   /v1/task-instances/{id}/context
+ *   completarTarea(taskId, opciones)      → PATCH /v1/task-instances/{id}
+ *   iniciarInstancia(definitionId, ctx)   → POST  /v1/workflow-instances
+ *   obtenerEstadoInstancia(instanceId)    → GET   /v1/workflow-instances/{id}
+ *   cerrarFlujo(instanceId)               → PATCH /v1/workflow-instances/{id}
  */
 
 const cds = require("@sap/cds");
@@ -47,17 +50,42 @@ async function getInboxTasks() {
   return Array.isArray(tareas) ? tareas : [];
 }
 
+// ─── OBTENER TAREA INDIVIDUAL ─────────────────────────────────────────────────
+
+/**
+ * Obtiene una tarea individual del BPA por su ID.
+ * Necesaria en la ruta Object Page para conocer el activityId (taskDefinitionId)
+ * del que se derivan los flags de visibilidad por rol (perfiles.calcularFlagsRol).
+ *
+ * Endpoint verificado en SPA_Workflow_Runtime.json:
+ *   GET /v1/task-instances/{taskInstanceId}
+ *
+ * @param {string} taskId - ID de la tarea BPA (campo "id" del TaskInstance)
+ * @returns {Promise<object|null>} TaskInstance completo (incluye activityId) o null si falla
+ */
+async function obtenerTarea(taskId) {
+  const svc = await getSvc();
+  try {
+    const tarea = await svc.get(`/task-instances/${taskId}`);
+    LOG.info(`obtenerTarea OK | taskId=${taskId}`);
+    return tarea;
+  } catch (error) {
+    LOG.error(`obtenerTarea ERROR | taskId=${taskId}`, error.message);
+    return null;
+  }
+}
+
 // ─── LEER CONTEXTO ────────────────────────────────────────────────────────────
 
 /**
  * Lee el contexto de una tarea BPA.
- * Origen legado: ContextModel.readContext(sTaskID) en Detail.controller.js
+ * Origen legado: ContextModel.readContext(taskId) en Detail.controller.js
  *
  * Endpoint verificado en SPA_Workflow_Runtime.json:
  *   GET /v1/task-instances/{taskId}/context
  *
- * Retorna el objeto contexto del BPA con los campos de negocio H2H:
- *   tituloTarea, numeroPropuesta, sociedad, banco, importe, flags de rol...
+ * Retorna el objeto contexto del BPA con la PropuestaNomina anidada según el
+ * proceso (startEvent.propuesta o startEvent.body — ver perfiles.PROCESOS).
  *
  * @param {string} taskId - ID de la tarea BPA (campo "id" del TaskInstance)
  * @returns {Promise<object|null>} Contexto de la tarea o null si falla
@@ -65,11 +93,11 @@ async function getInboxTasks() {
 async function readContext(taskId) {
   const svc = await getSvc();
   try {
-    const res = await svc.get(`/task-instances/${taskId}/context`);
+    const contexto = await svc.get(`/task-instances/${taskId}/context`);
     LOG.info(`readContext OK | taskId=${taskId}`);
-    return res;
-  } catch (err) {
-    LOG.error(`readContext ERROR | taskId=${taskId}`, err.message);
+    return contexto;
+  } catch (error) {
+    LOG.error(`readContext ERROR | taskId=${taskId}`, error.message);
     return null;
   }
 }
@@ -77,88 +105,98 @@ async function readContext(taskId) {
 // ─── COMPLETAR TAREA ──────────────────────────────────────────────────────────
 
 /**
- * Completa una tarea del Inbox de BPA actualizando su contexto.
- * Origen legado: ContextModel.triggerComplete() en Detail.controller.js
+ * Completa una user task del Inbox de BPA con su decision y contexto actualizado.
+ *
+ * El payload sigue el schema UpdateTaskInstancePayload del API oficial:
+ *   - status   : siempre "COMPLETED" (la ruta del flujo la decide la decision,
+ *                no el status — "FAILED" del legado era incorrecto)
+ *   - decision : ID real del botón del formulario BPA, resuelto por
+ *                perfiles.resolverDecision() (ej. "aprobar", "approve", "cancel")
+ *   - context  : contexto BPA con la PropuestaNomina anidada según el proceso
  *
  * Endpoint verificado en SPA_Workflow_Runtime.json:
  *   PATCH /v1/task-instances/{taskId}
- *   Body: { status: "COMPLETED", context: {...} }
  *
- * @param {string} taskId   - ID de la tarea BPA
- * @param {string} accion   - "confirm" | "Reject"
- * @param {object} params   - datos de la aprobación
+ * @param {string} taskId            - ID de la user task BPA
+ * @param {object} opciones
+ * @param {string} opciones.decision - ID de decision del formulario BPA
+ * @param {object} opciones.contexto - Contexto a escribir al completar
  * @returns {Promise<{ success: boolean, mensaje: string }>}
  */
-async function completarTarea(taskId, accion, {
-  pp, currentUser, rol, aprobado, comentario = "",
-  contexto, oApoReg = null, hanaPath = ""
-}) {
-  const svc  = await getSvc();
-  const now  = new Date();
-
-  // Payload verificado contra Detail.controller.js → completarTareaWF()
-  const oPeticion = {
-    TaskID          : taskId,
-    ApoRegIndicador : oApoReg ? "OK" : "",
-    ApoReg          : oApoReg ?? "",
-    AprobacionPP: {
-      Aprobacion: {
-        FechaAprob  : now,
-        HoraAprob   : `${now.getHours()}:${now.getMinutes()}:${now.getSeconds()}`,
-        Fecha       : `${now.getDate()}-${now.getMonth() + 1}-${now.getFullYear()}`,
-        Usuario     : currentUser.name,
-        NroPP       : pp.NroPP,
-        Sociedad    : pp.Sociedad,
-        FechaPP     : pp.FechaPP,
-        EstadoPP    : pp.EstadoPP,
-        RolID       : rol,
-        Correo      : currentUser.name,
-        Aprobado    : aprobado,
-        Observacion : comentario,
-      },
-      Propuesta: {
-        NroPP           : pp.NroPP,
-        Sociedad        : pp.Sociedad,
-        FechaPP         : pp.FechaPP,
-        EstadoPP        : pp.EstadoPP,
-        FechaPPJS       : pp.FechaPPJS,
-        Importe         : pp.Importe,
-        Moneda          : pp.Moneda,
-        UsrCreacionPP   : pp.UsrCreacionPP,
-        ModalidadPP     : pp.ModalidadPP,
-        ExisteDoc       : pp.ExisteDoc,
-        ViaPago         : pp.ViaPago,
-        BancoDescripcion: pp.BancoDescripcion,
-        Banco           : pp.Banco,
-        Version         : pp.Version,
-        IdInstanciaWF   : taskId,
-        UserCrea        : pp.UserCrea,
-        UserModif       : currentUser.name,
-        Analista        : pp.Analista,
-        CorreoAnalista  : pp.CorreoAnalista,
-        IndPAdelanto    : pp.IndPAdelanto,
-      },
-      Path: hanaPath,
-    },
-    WorkFlowData: {
-      status : "COMPLETED",
-      stage  : accion,
-      context: contexto,
-    },
-  };
-
+async function completarTarea(taskId, { decision, contexto }) {
+  const svc = await getSvc();
   try {
-    // PATCH /v1/task-instances/{taskId} — verificado en SPA_Workflow_Runtime.json
     await svc.patch(`/task-instances/${taskId}`, {
-      status : accion === "confirm" ? "COMPLETED" : "FAILED",
-      context: oPeticion,
+      status  : "COMPLETED",
+      decision,
+      context : contexto,
     });
 
-    LOG.info(`completarTarea OK | taskId=${taskId} accion=${accion} rol=${rol}`);
+    LOG.info(`completarTarea OK | taskId=${taskId} decision=${decision}`);
     return { success: true, mensaje: "Tarea completada correctamente" };
-  } catch (err) {
-    LOG.error(`completarTarea ERROR | taskId=${taskId}`, err.message);
-    return { success: false, mensaje: err.message };
+  } catch (error) {
+    LOG.error(`completarTarea ERROR | taskId=${taskId}`, error.message);
+    return { success: false, mensaje: error.message };
+  }
+}
+
+// ─── INICIAR INSTANCIA ────────────────────────────────────────────────────────
+
+/**
+ * Inicia una nueva instancia de workflow BPA.
+ * La usa el Analista al enviar el lote: arranca el proceso aprobacionDeNomina
+ * (perfiles.PROCESOS.aprobacionDeNomina.definitionId).
+ *
+ * Endpoint verificado en SPA_Workflow_Runtime.json:
+ *   POST /v1/workflow-instances
+ *   Body: { definitionId, context }
+ *
+ * @param {string} definitionId - ID cualificado del workflow (perfiles.PROCESOS)
+ * @param {object} contexto     - Contexto inicial con la PropuestaNomina anidada
+ * @returns {Promise<{ success: boolean, mensaje: string, instanceId: string|null }>}
+ */
+async function iniciarInstancia(definitionId, contexto) {
+  const svc = await getSvc();
+  try {
+    const instancia = await svc.post("/workflow-instances", {
+      definitionId,
+      context: contexto,
+    });
+
+    LOG.info(`iniciarInstancia OK | definitionId=${definitionId} instanceId=${instancia?.id}`);
+    return {
+      success   : true,
+      mensaje   : "Instancia de workflow iniciada correctamente",
+      instanceId: instancia?.id ?? null,
+    };
+  } catch (error) {
+    LOG.error(`iniciarInstancia ERROR | definitionId=${definitionId}`, error.message);
+    return { success: false, mensaje: error.message, instanceId: null };
+  }
+}
+
+// ─── OBTENER ESTADO DE INSTANCIA ──────────────────────────────────────────────
+
+/**
+ * Obtiene el estado de una instancia de workflow BPA.
+ * Útil para encadenar aprobacionFinal tras el fin de aprobacionDeNomina y
+ * para diagnosticar instancias ERRONEOUS durante el desarrollo.
+ *
+ * Endpoint verificado en SPA_Workflow_Runtime.json:
+ *   GET /v1/workflow-instances/{workflowInstanceId}
+ *
+ * @param {string} instanceId - ID de la instancia de workflow
+ * @returns {Promise<object|null>} WorkflowInstance (incluye status) o null si falla
+ */
+async function obtenerEstadoInstancia(instanceId) {
+  const svc = await getSvc();
+  try {
+    const instancia = await svc.get(`/workflow-instances/${instanceId}`);
+    LOG.info(`obtenerEstadoInstancia OK | instanceId=${instanceId} status=${instancia?.status}`);
+    return instancia;
+  } catch (error) {
+    LOG.error(`obtenerEstadoInstancia ERROR | instanceId=${instanceId}`, error.message);
+    return null;
   }
 }
 
@@ -181,15 +219,18 @@ async function cerrarFlujo(instanceId) {
     await svc.patch(`/workflow-instances/${instanceId}`, { status: "CANCELED" });
     LOG.info(`cerrarFlujo OK | instanceId=${instanceId}`);
     return { success: true, mensaje: "Flujo cerrado correctamente" };
-  } catch (err) {
-    LOG.error(`cerrarFlujo ERROR | instanceId=${instanceId}`, err.message);
-    return { success: false, mensaje: err.message };
+  } catch (error) {
+    LOG.error(`cerrarFlujo ERROR | instanceId=${instanceId}`, error.message);
+    return { success: false, mensaje: error.message };
   }
 }
 
 module.exports = {
   getInboxTasks,
+  obtenerTarea,
   readContext,
   completarTarea,
+  iniciarInstancia,
+  obtenerEstadoInstancia,
   cerrarFlujo,
 };

@@ -180,7 +180,7 @@ async function eliminarDoc({ propuesta, usuario, taskId }) {
  * Liberador vs Apoderado vs Analista) se refleja en los flags del contexto.
  */
 async function supervisorAprobar({ propuesta, usuario, taskId, constantes }) {
-  const sociedadesRevision = constantes?.aSociedadesRevision ?? [];
+  const sociedadesRevision = constantes?.sociedadesRevision ?? [];
 
   const necesitaRevisor = !propuesta.numeroPropuesta?.includes("CAR")
                         && propuesta.viaPago !== "C"
@@ -220,7 +220,7 @@ async function supervisorAprobar({ propuesta, usuario, taskId, constantes }) {
 
 /** TERMINAR_FLUJO (Supervisor) — cancela la instancia completa (sin decision) */
 async function supervisorTerminarFlujo({ propuesta, usuario, taskId, constantes }) {
-  const viasPagoValidar = constantes?.aValidarViaPago ?? [];
+  const viasPagoValidar = constantes?.validarViaPago ?? [];
   if (viasPagoValidar.includes(propuesta.viaPago)) {
     throw new Error("Esta acción no es válida para la vía de pago C, I, W o Z");
   }
@@ -274,7 +274,7 @@ async function revisorObservar({ propuesta, usuario, taskId, comentario }) {
  *   5. Completa tarea BPA con decision "aprobar"
  */
 async function apoderadoFirmar({ propuesta, usuario, taskId, constantes }) {
-  const sociedadesTermina = constantes?.aSociedadesTermina ?? [];
+  const sociedadesTermina = constantes?.sociedadesTermina ?? [];
 
   // 1. Contador de firmas: viaja en el contexto (no se consulta a SAP)
   const contadorFirma = propuesta.contadorFirma ?? 0;

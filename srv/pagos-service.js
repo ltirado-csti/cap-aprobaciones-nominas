@@ -21,6 +21,7 @@ const propSvc  = require("./domain/propuesta.service");
 const constSvc = require("./domain/constantes.service");
 const cpiInfra = require("./infrastructure/cpi-client");
 const bpa      = require("./infrastructure/bpa-client");
+const perfiles = require("./config/perfiles");
 const { Readable } = require("stream");
 
 const LOG = cds.log("PagosService");
@@ -39,12 +40,44 @@ function _handle(req, fn) {
 }
 
 /**
- * Enriquece los datos de la acción con el usuario autenticado.
- * El dominio espera `usuario : { name }`; si el frontend no lo envía en el
- * payload, se toma del contexto de seguridad CAP (req.user).
+ * Prepara los datos que el dominio necesita para ejecutar una acción bound.
+ *
+ * Migración a bound actions: el cliente ya NO envía propuesta/usuario/taskId.
+ *   - taskId    : clave instanceID de la instancia bound (req.params)
+ *   - propuesta : leída del contexto BPA — fuente autoritativa, el cliente
+ *                 no puede manipularla
+ *   - usuario   : del contexto de seguridad CAP (XSUAA).
+ *                 TODO(arquitecto): validar usuarioSAP si BTP y ECP difieren
+ *   - comentario: único dato que sí viene del dialog de Fiori Elements
+ *   - constantes: (opcional) constantes de negocio vía constantes.service
+ *
+ * @param {object}  req - Request CAP de la acción bound sobre TareasInbox
+ * @param {object}  [opciones]
+ * @param {boolean} [opciones.conConstantes=false] - incluir constantes de negocio
+ * @returns {Promise<object>} { propuesta, usuario, taskId, comentario, constantes? }
  */
-function _conUsuario(req) {
-  return { ...req.data, usuario: req.data.usuario ?? { name: req.user?.id } };
+async function _prepararAccion(req, { conConstantes = false } = {}) {
+  const taskId = req.params?.[0]?.instanceID ?? req.params?.[0];
+  if (!taskId) throw Object.assign(
+    new Error("No se pudo determinar la tarea (instanceID) de la acción"),
+    { status: 400 }
+  );
+
+  const contexto = await bpa.readContext(taskId);
+  if (!contexto) throw Object.assign(
+    new Error(`Contexto BPA no encontrado para la tarea ${taskId}`),
+    { status: 404 }
+  );
+
+  const datos = {
+    taskId,
+    propuesta : _extraerPropuesta(contexto),
+    usuario   : { name: req.user?.id },
+    comentario: req.data?.comentario,
+  };
+
+  if (conConstantes) datos.constantes = await constSvc.getConstantes();
+  return datos;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -80,13 +113,13 @@ class PagosService extends cds.ApplicationService {
     this.on("obtenerConstantes", async (_req) => {
       const { rpta } = await constSvc.getConstantes();
       return {
-        aSociedadesRevision: rpta.aSociedadesRevision,
-        aValidarViaPago    : rpta.aValidarViaPago,
-        aAprobarViaPago    : rpta.aAprobarViaPago,
-        aSociedadesTermina : rpta.aSociedadesTermina,
-        oTesoreros         : JSON.stringify(rpta.oTesoreros),
-        sDocumentUrl       : rpta.sDocumentUrl,
-        sDocumentUrlTasa   : rpta.sDocumentUrlTasa,
+        sociedadesRevision: rpta.sociedadesRevision,
+        validarViaPago    : rpta.validarViaPago,
+        aprobarViaPago    : rpta.aprobarViaPago,
+        sociedadesTermina : rpta.sociedadesTermina,
+        tesoreros         : JSON.stringify(rpta.tesoreros),
+        documentUrl       : rpta.documentUrl,
+        documentUrlTasa   : rpta.documentUrlTasa,
       };
     });
   }
@@ -145,24 +178,29 @@ class PagosService extends cds.ApplicationService {
       }
 
       // Con clave → verificar si se necesita el detalle completo de CPI.
-      // FCL hace $batch con $select reducido al seleccionar filas automáticamente.
+      // FCL hace $batch con $select reducido al seleccionar filas, y el modelo
+      // V4 emite "late property requests" por los campos que faltan en la caché.
       const columnas   = req.query?.SELECT?.columns ?? [];
       const nombres    = columnas.map(c => c?.ref?.[0]).filter(Boolean);
 
-      // Campos que pertenecen SOLO al Object Page (requieren llamada a CPI)
-      const camposCPI  = ["proveedores", "adjuntos", "aprobadores",
-                          "numeroPropuesta", "estadoPP", "indPAdelanto",
-                          "nroDocCompensacion", "fechaCompensacion"];
+      // Solo las composiciones provienen de CPI; todos los campos escalares de
+      // TareasInbox se derivan del contexto BPA (incluidos estadoPP, urlPDF y
+      // numeroPropuesta), así que las late requests toman la ruta liviana.
+      const camposCPI  = ["proveedores", "adjuntos", "aprobadores"];
 
       const necesitaCPI = nombres.length === 0 ||
                           nombres.some(nombre => camposCPI.includes(nombre));
 
       if (!necesitaCPI) {
         // FCL pidió solo campos livianos (importe, moneda, fechaPropuestaPago)
-        // Retornar solo el contexto BPA sin llamar a CPI
+        // Retornar solo datos BPA sin llamar a CPI. La tarea se obtiene en
+        // paralelo al contexto para derivar los flags de rol del activityId.
         LOG.info(`[READ TareasInbox] $select liviano — omitiendo CPI | id=${instanceID}`);
-        const contexto = await bpa.readContext(instanceID);
-        return contexto ? _mapearContextoBpa(instanceID, contexto) : null;
+        const [tarea, contexto] = await Promise.all([
+          bpa.obtenerTarea(instanceID),
+          bpa.readContext(instanceID),
+        ]);
+        return contexto ? _mapearContextoBpa(instanceID, contexto, tarea?.activityId) : null;
       }
 
       // $select completo o vacío → detalle completo con CPI
@@ -181,8 +219,8 @@ class PagosService extends cds.ApplicationService {
     this.on("READ", "Proveedor", async (req) => {
       const instanceID = _extraerInstanceID(req);
       if (!instanceID) return [];
-      const oDetalle = await _obtenerDetalleTarea(instanceID);
-      return oDetalle.proveedores ?? [];
+      const detalle = await _obtenerDetalleTarea(instanceID);
+      return detalle.proveedores ?? [];
     });
 
     /**
@@ -193,8 +231,8 @@ class PagosService extends cds.ApplicationService {
     this.on("READ", "Adjunto", async (req) => {
       const instanceID = _extraerInstanceID(req);
       if (!instanceID) return [];
-      const oDetalle = await _obtenerDetalleTarea(instanceID);
-      return oDetalle.adjuntos ?? [];
+      const detalle = await _obtenerDetalleTarea(instanceID);
+      return detalle.adjuntos ?? [];
     });
 
     /**
@@ -205,8 +243,8 @@ class PagosService extends cds.ApplicationService {
     this.on("READ", "Aprobador", async (req) => {
       const instanceID = _extraerInstanceID(req);
       if (!instanceID) return [];
-      const oDetalle = await _obtenerDetalleTarea(instanceID);
-      return oDetalle.aprobadores ?? [];
+      const detalle = await _obtenerDetalleTarea(instanceID);
+      return detalle.aprobadores ?? [];
     });
   }
 
@@ -214,42 +252,45 @@ class PagosService extends cds.ApplicationService {
 
   static handle_analistaT() {
     /**
-     * POST /nomina/aprobaciones/enviarSupervisorOCaja
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.enviarSupervisorOCaja
      * Enruta según viaPago: W → EN_CAJA, resto → VALIDACION
      */
-    this.on("enviarSupervisorOCaja", (req) =>
-      _handle(req, () => aprobSvc.enviarSupervisorOCaja(_conUsuario(req)))
+    this.on("enviarSupervisorOCaja", "TareasInbox", (req) =>
+      _handle(req, async () =>
+        aprobSvc.enviarSupervisorOCaja(await _prepararAccion(req, { conConstantes: true }))
+      )
     );
 
     /**
-     * POST /nomina/aprobaciones/compensar
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.compensar
      * Obtiene documento de compensación desde CPI y actualiza la propuesta.
      */
-    this.on("compensar", async (req) =>
+    this.on("compensar", "TareasInbox", (req) =>
       _handle(req, async () => {
-        const docCompensacion = await cpiInfra.consultarCompensacion(req.data.propuesta);
+        const datos = await _prepararAccion(req);
+        const docCompensacion = await cpiInfra.consultarCompensacion(datos.propuesta);
         if (!docCompensacion) throw Object.assign(
           new Error("No se pudo obtener el documento de compensación desde SAP"),
           { status: 500 }
         );
-        return aprobSvc.compensar({ ..._conUsuario(req), docCompensacion });
+        return aprobSvc.compensar({ ...datos, docCompensacion });
       })
     );
 
     /**
-     * POST /nomina/aprobaciones/cerrarPorObservacion
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.cerrarPorObservacion
      * OBS_SUPER → CERRADO_OB
      */
-    this.on("cerrarPorObservacion", (req) =>
-      _handle(req, () => aprobSvc.cerrarPorObservacion(_conUsuario(req)))
+    this.on("cerrarPorObservacion", "TareasInbox", (req) =>
+      _handle(req, async () => aprobSvc.cerrarPorObservacion(await _prepararAccion(req)))
     );
 
     /**
-     * POST /nomina/aprobaciones/eliminarDoc
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.eliminarDoc
      * GENERADO → ELIMINADO
      */
-    this.on("eliminarDoc", (req) =>
-      _handle(req, () => aprobSvc.eliminarDoc(_conUsuario(req)))
+    this.on("eliminarDoc", "TareasInbox", (req) =>
+      _handle(req, async () => aprobSvc.eliminarDoc(await _prepararAccion(req)))
     );
   }
 
@@ -257,35 +298,39 @@ class PagosService extends cds.ApplicationService {
 
   static handle_supervisor() {
     /**
-     * POST /nomina/aprobaciones/supervisorAprobar
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.supervisorAprobar
      * Enruta según modalidadPP, viaPago y sociedades de revisión.
      */
-    this.on("supervisorAprobar", (req) =>
-      _handle(req, () => aprobSvc.supervisorAprobar(_conUsuario(req)))
+    this.on("supervisorAprobar", "TareasInbox", (req) =>
+      _handle(req, async () =>
+        aprobSvc.supervisorAprobar(await _prepararAccion(req, { conConstantes: true }))
+      )
     );
 
     /**
-     * POST /nomina/aprobaciones/supervisorTerminarFlujo
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.supervisorTerminarFlujo
      * Cancela la instancia BPA completa. Solo disponible cuando puedeTerminarFlujo = true.
      */
-    this.on("supervisorTerminarFlujo", (req) =>
-      _handle(req, () => aprobSvc.supervisorTerminarFlujo(_conUsuario(req)))
+    this.on("supervisorTerminarFlujo", "TareasInbox", (req) =>
+      _handle(req, async () =>
+        aprobSvc.supervisorTerminarFlujo(await _prepararAccion(req, { conConstantes: true }))
+      )
     );
 
     /**
-     * POST /nomina/aprobaciones/supervisorObservar
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.supervisorObservar
      * VALIDACION → OBS_SUPER (CPI: ZfiWsH2hObs, PiEstado=OBTR)
      */
-    this.on("supervisorObservar", (req) =>
-      _handle(req, () => aprobSvc.supervisorObservar(_conUsuario(req)))
+    this.on("supervisorObservar", "TareasInbox", (req) =>
+      _handle(req, async () => aprobSvc.supervisorObservar(await _prepararAccion(req)))
     );
 
     /**
-     * POST /nomina/aprobaciones/supervisorAnular
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.supervisorAnular
      * Anula la propuesta. Solo disponible cuando puedeAnular = true.
      */
-    this.on("supervisorAnular", (req) =>
-      _handle(req, () => aprobSvc.supervisorAnular(_conUsuario(req)))
+    this.on("supervisorAnular", "TareasInbox", (req) =>
+      _handle(req, async () => aprobSvc.supervisorAnular(await _prepararAccion(req)))
     );
   }
 
@@ -293,19 +338,19 @@ class PagosService extends cds.ApplicationService {
 
   static handle_revisor() {
     /**
-     * POST /nomina/aprobaciones/revisorAprobar
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.revisorAprobar
      * REVISION → EN_FIRMA
      */
-    this.on("revisorAprobar", (req) =>
-      _handle(req, () => aprobSvc.revisorAprobar(_conUsuario(req)))
+    this.on("revisorAprobar", "TareasInbox", (req) =>
+      _handle(req, async () => aprobSvc.revisorAprobar(await _prepararAccion(req)))
     );
 
     /**
-     * POST /nomina/aprobaciones/revisorObservar
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.revisorObservar
      * REVISION → OBS_REVISOR (CPI: ZfiWsH2hObs, PiEstado=OBRA)
      */
-    this.on("revisorObservar", (req) =>
-      _handle(req, () => aprobSvc.revisorObservar(_conUsuario(req)))
+    this.on("revisorObservar", "TareasInbox", (req) =>
+      _handle(req, async () => aprobSvc.revisorObservar(await _prepararAccion(req)))
     );
   }
 
@@ -313,28 +358,30 @@ class PagosService extends cds.ApplicationService {
 
   static handle_apoderado() {
     /**
-     * POST /nomina/aprobaciones/apoderadoFirmar
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.apoderadoFirmar
      * Lógica F1/F2: contadorFirma determina si es primera o segunda firma.
      * registrarAprobacionSAP (CPI /apoReg) se llama antes de completar BPA.
      */
-    this.on("apoderadoFirmar", (req) =>
-      _handle(req, () => aprobSvc.apoderadoFirmar(_conUsuario(req)))
+    this.on("apoderadoFirmar", "TareasInbox", (req) =>
+      _handle(req, async () =>
+        aprobSvc.apoderadoFirmar(await _prepararAccion(req, { conConstantes: true }))
+      )
     );
 
     /**
-     * POST /nomina/aprobaciones/apoderadoObservar
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.apoderadoObservar
      * EN_FIRMA → OBS_APODER (CPI: ZfiWsH2hObs, PiEstado=OBAP)
      */
-    this.on("apoderadoObservar", (req) =>
-      _handle(req, () => aprobSvc.apoderadoObservar(_conUsuario(req)))
+    this.on("apoderadoObservar", "TareasInbox", (req) =>
+      _handle(req, async () => aprobSvc.apoderadoObservar(await _prepararAccion(req)))
     );
 
     /**
-     * POST /nomina/aprobaciones/redirigirApoderado
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.redirigirApoderado
      * Redirige la firma a otro apoderado. El comentario contiene el email destino.
      */
-    this.on("redirigirApoderado", (req) =>
-      _handle(req, () => aprobSvc.redirigirApoderado(_conUsuario(req)))
+    this.on("redirigirApoderado", "TareasInbox", (req) =>
+      _handle(req, async () => aprobSvc.redirigirApoderado(await _prepararAccion(req)))
     );
   }
 
@@ -342,19 +389,19 @@ class PagosService extends cds.ApplicationService {
 
   static handle_caja() {
     /**
-     * POST /nomina/aprobaciones/cajaConfirmarPago
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.cajaConfirmarPago
      * EN_CAJA → PAGADO. Cierra el flujo BPA.
      */
-    this.on("cajaConfirmarPago", (req) =>
-      _handle(req, () => aprobSvc.cajaConfirmarPago(_conUsuario(req)))
+    this.on("cajaConfirmarPago", "TareasInbox", (req) =>
+      _handle(req, async () => aprobSvc.cajaConfirmarPago(await _prepararAccion(req)))
     );
 
     /**
-     * POST /nomina/aprobaciones/cajaObservar
+     * POST /nomina/aprobaciones/TareasInbox('id')/PagosService.cajaObservar
      * EN_CAJA → OBS_CAJA (CPI: ZfiWsH2hObs, PiEstado=OBCA)
      */
-    this.on("cajaObservar", (req) =>
-      _handle(req, () => aprobSvc.cajaObservar(_conUsuario(req)))
+    this.on("cajaObservar", "TareasInbox", (req) =>
+      _handle(req, async () => aprobSvc.cajaObservar(await _prepararAccion(req)))
     );
   }
 }
@@ -420,12 +467,14 @@ class PagosService extends cds.ApplicationService {
    *
    * @param {string} instanceID - ID de la tarea BPA
    * @param {object} contexto   - Contexto crudo de bpa.readContext
+   * @param {string} activityId - taskDefinitionId de la tarea (para flags de rol)
    * @returns {object} Registro TareasInbox liviano (sin proveedores/adjuntos)
    */
-  function _mapearContextoBpa(instanceID, contexto) {
+  function _mapearContextoBpa(instanceID, contexto, activityId) {
     const propuesta = _extraerPropuesta(contexto);
     return _ensamblarDetalle({
       instanceID,
+      activityId,
       propuesta,
       proveedores : [],
       adjuntos    : [],
@@ -435,13 +484,24 @@ class PagosService extends cds.ApplicationService {
 
   /**
    * Enriquece una tarea BPA con su contexto para el List Report.
-   * @param {object} tarea - Tarea raw del BPA (getInboxTasks)
+   * Los flags de rol se calculan desde el activityId (taskDefinitionId) de la
+   * tarea vía perfiles.calcularFlagsRol() — ya no se leen del contexto.
+   * Los flags de estado (estaTerminado/estaAnulado) sí provienen del contexto.
+   *
+   * @param {object} tarea - Tarea raw del BPA (getInboxTasks), incluye activityId
    * @returns {Promise<object>} TareasInbox con campos de negocio completos
    */
   async function _enriquecerConContexto(tarea) {
+    // Flags de rol derivados del formulario BPA de la tarea
+    const flagsRol = perfiles.calcularFlagsRol(tarea.activityId);
+
     try {
       const contexto  = await bpa.readContext(tarea.id);
       const propuesta = _extraerPropuesta(contexto);
+
+      // Flags de estado de la propuesta — sí se leen del contexto BPA
+      const estaTerminado = propuesta.estaTerminado ?? false;
+      const estaAnulado   = propuesta.estaAnulado   ?? false;
 
       return {
         instanceID         : tarea.id,
@@ -458,21 +518,19 @@ class PagosService extends cds.ApplicationService {
         fechaPropuestaPago : propuesta.fechaPropuestaPago ?? "",
         usuarioCreacion    : propuesta.usuarioCreacion    ?? "",
         correoAnalista     : propuesta.correoAnalista     ?? "",
-        // Flags de rol — leídos directamente del contexto BPA
-        tieneAnalista      : propuesta.tieneAnalista      ?? false,
-        estaConforme       : propuesta.estaConforme       ?? false,
-        tieneRevisor       : propuesta.tieneRevisor       ?? false,
-        estaAprobado       : propuesta.estaAprobado       ?? false,
-        esCaja             : propuesta.esCaja             ?? false,
-        estaTerminado      : propuesta.estaTerminado      ?? false,
-        estaAnulado        : propuesta.estaAnulado        ?? false,
-        puedeTerminarFlujo : (propuesta.estaConforme ?? false) && (propuesta.estaTerminado ?? false),
-        puedeAnular        : (propuesta.estaConforme ?? false) && (propuesta.estaAnulado   ?? false),
+        // Flags de rol — calculados desde el taskDefinitionId, no del contexto
+        ...flagsRol,
+        estaTerminado,
+        estaAnulado,
+        // Visibilidad doble del Coordinador
+        puedeTerminarFlujo : flagsRol.esCoordinador && estaTerminado,
+        puedeAnular        : flagsRol.esCoordinador && estaAnulado,
       };
 
     } catch (error) {
       // readContext falló para esta tarea — retornar con datos mínimos
-      // para no bloquear el resto de la lista
+      // para no bloquear el resto de la lista. Los flags de rol se conservan
+      // porque no dependen del contexto.
       LOG.warn(`[_enriquecerConContexto] readContext falló | id=${tarea.id} | ${error.message}`);
       return {
         instanceID         : tarea.id,
@@ -481,9 +539,9 @@ class PagosService extends cds.ApplicationService {
         importe            : "", moneda: "", viaPago: "", modalidadPP: "",
         version            : "", fechaPropuestaPago: "", usuarioCreacion: "",
         correoAnalista     : "",
-        tieneAnalista      : false, estaConforme: false, tieneRevisor: false,
-        estaAprobado       : false, esCaja: false, estaTerminado: false,
-        estaAnulado        : false, puedeTerminarFlujo: false, puedeAnular: false,
+        ...flagsRol,
+        estaTerminado      : false, estaAnulado: false,
+        puedeTerminarFlujo : false, puedeAnular: false,
       };
     }
   }
@@ -498,8 +556,12 @@ class PagosService extends cds.ApplicationService {
    */
   async function _obtenerDetalleTarea(instanceID) {
     try {
-      // Primero obtener el contexto — las composiciones dependen de sus datos
-      const contexto = await bpa.readContext(instanceID);
+      // Tarea y contexto en paralelo: la tarea aporta el activityId (flags de
+      // rol) y el contexto los datos de negocio de los que dependen las composiciones
+      const [tarea, contexto] = await Promise.all([
+        bpa.obtenerTarea(instanceID),
+        bpa.readContext(instanceID),
+      ]);
 
       if (!contexto) {
         throw Object.assign(
@@ -517,7 +579,14 @@ class PagosService extends cds.ApplicationService {
         _obtenerAprobadores(propuesta).catch(() => [])
       ]);
 
-      return _ensamblarDetalle({ instanceID, propuesta, proveedores, adjuntos, aprobadores });
+      return _ensamblarDetalle({
+        instanceID,
+        activityId: tarea?.activityId,
+        propuesta,
+        proveedores,
+        adjuntos,
+        aprobadores,
+      });
 
     } catch (error) {
       if (error.status === 404) throw error;
@@ -527,16 +596,19 @@ class PagosService extends cds.ApplicationService {
   }
 
   /**
-   * Ensambla el objeto final TareasInbox con campos, composiciones y flags de rol.
+   * Ensambla el objeto final TareasInbox con campos, composiciones y flags.
    *
-   * Campos calculados para visibilidad doble del Supervisor
-   *   puedeTerminarFlujo = estaConforme AND estaTerminado
-   *   puedeAnular        = estaConforme AND estaAnulado
+   * Flags de rol (esCoordinador, esApoderado, esLiberador, esAnalista, esCaja):
+   *   calculados desde el activityId (taskDefinitionId) vía perfiles.calcularFlagsRol().
+   * Flags de estado (estaTerminado, estaAnulado): leídos del contexto BPA.
+   * Campos calculados para visibilidad doble del Coordinador:
+   *   puedeTerminarFlujo = esCoordinador AND estaTerminado
+   *   puedeAnular        = esCoordinador AND estaAnulado
    *
-   * @param {object} params - { instanceID, propuesta, proveedores, adjuntos, aprobadores }
+   * @param {object} params - { instanceID, activityId, propuesta, proveedores, adjuntos, aprobadores }
    * @returns {object} Registro TareasInbox listo para la Object Page
    */
-  function _ensamblarDetalle({ instanceID, propuesta, proveedores, adjuntos, aprobadores }) {
+  function _ensamblarDetalle({ instanceID, activityId, propuesta, proveedores, adjuntos, aprobadores }) {
     // Campos base — nombres exactos de PropuestaNomina.json
     const base = {
       instanceID            : instanceID,
@@ -557,6 +629,11 @@ class PagosService extends cds.ApplicationService {
       correoAnalista        : propuesta.correoAnalista,
       existeDocumento       : propuesta.existeDocumento,
       indicadorPagoAdelanto : propuesta.indicadorPagoAdelanto,
+      // Estado del flujo — lo escribe aprobacion.service en el contexto BPA
+      // (VALIDACION, REVISION, EN_FIRMA, EN_CAJA, PAGADO, OBS_*, ...)
+      estadoPP              : propuesta.estadoPP ?? "",
+      // URL del PDF para descarga — media entity servida por handle_pdf
+      urlPDF                : `/nomina/aprobaciones/PropuestaPDF('${instanceID}')/contenido`,
       contadorFirma         : propuesta.contadorFirma,
       usuarioApoderado      : propuesta.usuarioApoderado,
       usuarioCaja           : propuesta.usuarioCaja,
@@ -565,27 +642,26 @@ class PagosService extends cds.ApplicationService {
       usuariosSupervisores  : propuesta.usuariosSupervisores,
     };
 
-    // Flags de visibilidad por rol (Tareas 3.1 a 3.5)
-    // Nombres exactos de PropuestaNomina.json — sin prefijo "b" del legado
-    const flagsRol = {
-      tieneAnalista : propuesta.tieneAnalista ?? false,
-      estaConforme  : propuesta.estaConforme  ?? false,
-      tieneRevisor  : propuesta.tieneRevisor  ?? false,
-      estaAprobado  : propuesta.estaAprobado  ?? false,
-      esCaja        : propuesta.esCaja        ?? false,
+    // Flags de rol — calculados desde el taskDefinitionId de la tarea BPA
+    // (Refactoring Visibilidad: reemplazan a los flags legado del contexto)
+    const flagsRol = perfiles.calcularFlagsRol(activityId);
+
+    // Flags de estado de la propuesta — sí provienen del contexto BPA
+    const flagsEstado = {
       estaTerminado : propuesta.estaTerminado ?? false,
       estaAnulado   : propuesta.estaAnulado   ?? false,
     };
 
-    // Campos calculados para visibilidad doble del Supervisor (Tarea 3.2)
+    // Campos calculados para visibilidad doble del Coordinador
     const flagsCalculados = {
-      puedeTerminarFlujo : flagsRol.estaConforme && flagsRol.estaTerminado,
-      puedeAnular        : flagsRol.estaConforme && flagsRol.estaAnulado,
+      puedeTerminarFlujo : flagsRol.esCoordinador && flagsEstado.estaTerminado,
+      puedeAnular        : flagsRol.esCoordinador && flagsEstado.estaAnulado,
     };
 
     return {
       ...base,
       ...flagsRol,
+      ...flagsEstado,
       ...flagsCalculados,
       proveedores,
       adjuntos,
@@ -602,20 +678,20 @@ class PagosService extends cds.ApplicationService {
    * @returns {string|null} instanceID de la tarea padre
    */
   function _extraerInstanceID(req) {
-    const aParams = req.params ?? [];
+    const parametros = req.params ?? [];
 
     // Caso 1: params[0] es objeto con propiedad instanceID (navegación OData)
-    if (aParams[0]?.instanceID) return aParams[0].instanceID;
+    if (parametros[0]?.instanceID) return parametros[0].instanceID;
 
     // Caso 2: params[0] es string directo
-    if (typeof aParams[0] === "string") return aParams[0];
+    if (typeof parametros[0] === "string") return parametros[0];
 
     // Caso 3: viene como filtro en el query (Fiori Elements en algunos escenarios)
-    const sFromQuery = req.query?.SELECT?.from?.ref?.[0]?.where?.find?.(
+    const instanceIDDesdeQuery = req.query?.SELECT?.from?.ref?.[0]?.where?.find?.(
       w => w?.ref?.[0] === "instanceID"
     )?.val;
 
-    return sFromQuery ?? null;
+    return instanceIDDesdeQuery ?? null;
   }
 
   /**
@@ -658,61 +734,73 @@ class PagosService extends cds.ApplicationService {
    * Parsea "dd-MM-yyyy" (formato del contexto BPA) a objeto Date JavaScript.
    * Necesaria para claves datetime de SAP Gateway: Laufd=datetime'yyyy-MM-ddT...'
    *
-   * @param {string} sFecha - Fecha en formato "dd-MM-yyyy" (ej: "20-05-2026")
+   * @param {string} fecha - Fecha en formato "dd-MM-yyyy" (ej: "20-05-2026")
    * @returns {Date} Objeto Date en hora cero UTC
    */
-  function _parseFechaPP(sFecha) {
-    if (!sFecha) return new Date();
-    const [dd, mm, yyyy] = sFecha.split("-");
-    return new Date(`${yyyy}-${mm}-${dd}T00:00:00.000Z`);
+  function _parseFechaPP(fecha) {
+    if (!fecha) return new Date();
+    const [dia, mes, anio] = fecha.split("-");
+    return new Date(`${anio}-${mes}-${dia}T00:00:00.000Z`);
   }
 
 /**
  * Mock de lista de tareas para el List Report cuando BPA no está disponible.
  * Activo en modo local (cds watch sin --profile hybrid).
+ * Los flags de rol se derivan del activityId con el mismo mecanismo real
+ * (perfiles.calcularFlagsRol), igual que en _enriquecerConContexto.
  *
  * @returns {Array} 3 tareas representando los casos típicos del negocio
  */
 function _getMockTareas() {
-  return [
+  const tareas = [
     {
       instanceID: "mock-task-001",
-      context: {
-        tituloTarea: "0025-R4603-BCP-20/05/2026-R", numeroPropuesta: "R4603",
-        sociedad: "0025", fechaPropuestaPago: "20-05-2026", banco: "BCP",
-        bancoDescripcion: "001 - BCP Soles", viaPago: "N", modalidadPP: "H2H",
-        version: "0001", importe: "43038.69", moneda: "PEN",
-        usuarioCreacion: "cpanduro@centria.net",
-        tieneAnalista: false,
-        estaConforme : false,
-        tieneRevisor : true,   // ← simula rol Revisor
-        estaAprobado : false,
-        esCaja       : false,
-        estaTerminado: false,
-        estaAnulado  : false,
-      }
+      // Simula tarea del Liberador (form_aprobacionFinalForm_2)
+      activityId: "form_aprobacionFinalForm_2",
+      tituloTarea: "0025-R4603-BCP-20/05/2026-L", numeroPropuesta: "R4603",
+      sociedad: "0025", fechaPropuestaPago: "20-05-2026", banco: "BCP",
+      bancoDescripcion: "001 - BCP Soles", viaPago: "N", modalidadPP: "H2H",
+      version: "0001", importe: "43038.69", moneda: "PEN",
+      usuarioCreacion: "cpanduro@centria.net",
+      estaTerminado: false,
+      estaAnulado  : false,
     },
     {
       instanceID: "mock-task-002",
-      context: {
-        tituloTarea: "0025-R4610-SCO-21/05/2026-I", numeroPropuesta: "R4610",
-        sociedad: "0025", fechaPropuestaPago: "21-05-2026", banco: "SCOTIABANK",
-        bancoDescripcion: "009 - Scotiabank Soles", viaPago: "I", modalidadPP: "H2H",
-        version: "0001", importe: "15200.00", moneda: "PEN",
-        usuarioCreacion: "arodas@centria.net",
-      }
+      // Simula tarea del Coordinador (form_aprobacionDelCoordinador_2)
+      activityId: "form_aprobacionDelCoordinador_2",
+      tituloTarea: "0025-R4610-SCO-21/05/2026-S", numeroPropuesta: "R4610",
+      sociedad: "0025", fechaPropuestaPago: "21-05-2026", banco: "SCOTIABANK",
+      bancoDescripcion: "009 - Scotiabank Soles", viaPago: "I", modalidadPP: "H2H",
+      version: "0001", importe: "15200.00", moneda: "PEN",
+      usuarioCreacion: "arodas@centria.net",
+      estaTerminado: true,   // → puedeTerminarFlujo = true (visibilidad doble)
+      estaAnulado  : false,
     },
     {
       instanceID: "mock-task-003",
-      context: {
-        tituloTarea: "0025-R4615-BCP-22/05/2026-W", numeroPropuesta: "R4615",
-        sociedad: "0025", fechaPropuestaPago: "22-05-2026", banco: "BCP",
-        bancoDescripcion: "001 - BCP Soles", viaPago: "W", modalidadPP: "H2H",
-        version: "0001", importe: "8500.00", moneda: "PEN",
-        usuarioCreacion: "arodas@centria.net",
-      }
+      // Simula tarea del Apoderado, primera firma (form_aprobacionDelApoderado_1)
+      activityId: "form_aprobacionDelApoderado_1",
+      tituloTarea: "0025-R4615-BCP-22/05/2026-A", numeroPropuesta: "R4615",
+      sociedad: "0025", fechaPropuestaPago: "22-05-2026", banco: "BCP",
+      bancoDescripcion: "001 - BCP Soles", viaPago: "W", modalidadPP: "H2H",
+      version: "0001", importe: "8500.00", moneda: "PEN",
+      usuarioCreacion: "arodas@centria.net",
+      estaTerminado: false,
+      estaAnulado  : false,
     },
   ];
+
+  // Derivar flags de rol y calculados con el mecanismo real de visibilidad
+  return tareas.map(tarea => {
+    const flagsRol = perfiles.calcularFlagsRol(tarea.activityId);
+    return {
+      ...tarea,
+      ...flagsRol,
+      puedeTerminarFlujo: flagsRol.esCoordinador && tarea.estaTerminado,
+      puedeAnular       : flagsRol.esCoordinador && tarea.estaAnulado,
+    };
+  });
 }
 
 /**
@@ -743,19 +831,20 @@ function _getMockDetalle(instanceID) {
     contadorFirma         : 0,
     usuarioCreacion       : "cpanduro@centria.net",
     usuarioCreacionPP     : "MRICANQUI",
+    estadoPP              : "REVISION",
+    urlPDF                : `/nomina/aprobaciones/PropuestaPDF('${instanceID}')/contenido`,
     usuarioApoderado      : "",
     usuarioCaja           : "",
     usuariosRevisores     : ["mminchan@urbanova.com.pe", "evillalobos@urbanova.com.pe"],
     usuariosAnalistas     : ["mricanqui@centria.net", "arodas@centria.net"],
     usuariosSupervisores  : ["cpanduro@centria.net", "ypocco@centria.net"],
-    // Flags de rol — ajustar para simular distintos roles durante desarrollo
-    tieneAnalista         : false,
-    estaConforme          : false,
-    tieneRevisor          : true,
-    estaAprobado          : false,
-    esCaja                : false,
+    // Flags de rol — derivados del activityId mock (Liberador) con el mecanismo real.
+    // Cambiar el activityId para simular otros roles durante el desarrollo.
+    ...perfiles.calcularFlagsRol("form_aprobacionFinalForm_2"),
+    // Flags de estado de la propuesta
     estaTerminado         : false,
     estaAnulado           : false,
+    // Visibilidad doble del Coordinador (false: la tarea mock es del Liberador)
     puedeTerminarFlujo    : false,
     puedeAnular           : false,
     // Composiciones mock

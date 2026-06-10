@@ -18,8 +18,8 @@
  * correspondiente, manteniendo la misma firma de getConstantes().
  *
  * Usadas en:
- *   Master   → onPressHome (sDocumentUrl / sDocumentUrlTasa)
- *   Detail   → aSociedadesRevision, aValidarViaPago, aSociedadesTermina
+ *   Master   → onPressHome (documentUrl / documentUrlTasa)
+ *   Detail   → sociedadesRevision, validarViaPago, sociedadesTermina
  *   domain/aprobacion.service → enrutamiento por sociedad y vía de pago
  */
 
@@ -45,14 +45,14 @@ const CONSTANTES_ESTATICAS = {
 
   // Sociedades que requieren paso de Revisor antes del Apoderado.
   // Si la sociedad NO está aquí → va directo a Apoderado.
-  aSociedadesRevision: [
+  sociedadesRevision: [
     "0025",
     // Agregar más códigos de sociedad según corresponda
   ],
 
   // Vías de pago que NO permiten terminar flujo directamente desde Supervisor.
   // Verifica en supervisorTerminarFlujo().
-  aValidarViaPago: [
+  validarViaPago: [
     "C",  // Cheque
     "I",  // Interbank
     "W",  // Caja
@@ -60,14 +60,14 @@ const CONSTANTES_ESTATICAS = {
   ],
 
   // Vías de pago que requieren adjunto de constancia de banco antes de aprobar.
-  aAprobarViaPago: [
+  aprobarViaPago: [
     "I",
     "Z",
   ],
 
   // Sociedades que permiten terminar el flujo luego de una sola firma (F1).
   // Si la sociedad está aquí → bConformeTermina = true en apoderadoFirmar().
-  aSociedadesTermina: [
+  sociedadesTermina: [
     // Completar con los códigos de sociedad reales
     // "XXXX",
   ],
@@ -75,17 +75,17 @@ const CONSTANTES_ESTATICAS = {
   // Mapa de tesoreros por sociedad.
   // Usado para envío de correo (enviarCorreoAprobadores profil="TR").
   // Clave: código de sociedad SAP (4 chars). Valor: email del tesorero.
-  oTesoreros: {
+  tesoreros: {
     "0025": "tesorero@empresa.com.pe",
     // Agregar más entradas según corresponda
   },
 
   // URL del portal de documentos (onPressHome en Master.controller.js).
   // Aplica para usuarios con dominio genérico.
-  sDocumentUrl: "https://portal.empresa.com.pe/documentos",
+  documentUrl: "https://portal.empresa.com.pe/documentos",
 
   // URL del portal para usuarios con dominio @tasa.com.pe.
-  sDocumentUrlTasa: "https://portal.empresa.com.pe/documentos",
+  documentUrlTasa: "https://portal.empresa.com.pe/documentos",
 };
 
 // ─── CACHE EN MEMORIA ─────────────────────────────────────────────────────────
@@ -99,7 +99,7 @@ let _cache = null;
  * Llamadas siguientes → retorna el objeto cacheado.
  *
  * Misma firma que tenía cuando leía de HANA:
- *   returns { rpta: { aSociedadesRevision, aValidarViaPago, ... } }
+ *   returns { rpta: { sociedadesRevision, validarViaPago, ... } }
  *
  * @returns {{ rpta: object }}
  */
@@ -109,13 +109,13 @@ async function getConstantes() {
   // Copia profunda para evitar mutaciones accidentales en el objeto estático
   _cache = {
     rpta: {
-      aSociedadesRevision: [...CONSTANTES_ESTATICAS.aSociedadesRevision],
-      aValidarViaPago    : [...CONSTANTES_ESTATICAS.aValidarViaPago],
-      aAprobarViaPago    : [...CONSTANTES_ESTATICAS.aAprobarViaPago],
-      aSociedadesTermina : [...CONSTANTES_ESTATICAS.aSociedadesTermina],
-      oTesoreros         : { ...CONSTANTES_ESTATICAS.oTesoreros },
-      sDocumentUrl       : CONSTANTES_ESTATICAS.sDocumentUrl,
-      sDocumentUrlTasa   : CONSTANTES_ESTATICAS.sDocumentUrlTasa,
+      sociedadesRevision: [...CONSTANTES_ESTATICAS.sociedadesRevision],
+      validarViaPago    : [...CONSTANTES_ESTATICAS.validarViaPago],
+      aprobarViaPago    : [...CONSTANTES_ESTATICAS.aprobarViaPago],
+      sociedadesTermina : [...CONSTANTES_ESTATICAS.sociedadesTermina],
+      tesoreros         : { ...CONSTANTES_ESTATICAS.tesoreros },
+      documentUrl       : CONSTANTES_ESTATICAS.documentUrl,
+      documentUrlTasa   : CONSTANTES_ESTATICAS.documentUrlTasa,
     },
   };
 

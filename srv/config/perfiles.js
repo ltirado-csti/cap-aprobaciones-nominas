@@ -343,6 +343,71 @@ function resolverTaskDefinitionId(nombreFuncional, opts = {}) {
 }
 
 /**
+ * Resuelve el nombre funcional del rol a partir del taskDefinitionId de la tarea.
+ * El campo activityId del TaskInstance (GET /v1/task-instances) trae el ID del
+ * formulario BPA (ej. "form_aprobacionDelCoordinador_2"). En algunos despliegues
+ * puede venir cualificado, por eso se compara también por sufijo.
+ *
+ * Es la base del refactoring de visibilidad: la visibilidad de botones depende
+ * de QUÉ tarea es (taskDefinitionId), no del estado de la propuesta en contexto.
+ *
+ * @param {string} taskDefinitionId - activityId del TaskInstance BPA
+ * @returns {string|null} nombre funcional ("coordinador" | "apoderado" | "liberador") o null
+ *
+ * Ejemplos:
+ *   resolverNombrePorTaskDefinitionId("form_aprobacionDelCoordinador_2") → "coordinador"
+ *   resolverNombrePorTaskDefinitionId("form_aprobacionDelApoderado_1")   → "apoderado"
+ *   resolverNombrePorTaskDefinitionId("form_aprobacionFinalForm_2")      → "liberador"
+ *   resolverNombrePorTaskDefinitionId("otro_formulario")                 → null
+ */
+function resolverNombrePorTaskDefinitionId(taskDefinitionId) {
+    if (!taskDefinitionId) return null;
+
+    for (const [nombre, perfil] of Object.entries(PERFILES)) {
+        const tdi = perfil.bpa.taskDefinitionId;
+        if (!tdi) continue;
+
+        // taskDefinitionId simple (coordinador, liberador) u objeto firma1/firma2 (apoderado)
+        const candidatos = typeof tdi === "string" ? [tdi] : Object.values(tdi);
+
+        const coincide = candidatos.some(id =>
+            taskDefinitionId === id || taskDefinitionId.endsWith(id)
+        );
+        if (coincide) return nombre;
+    }
+    return null;
+}
+
+/**
+ * Calcula los flags de visibilidad por rol a partir del taskDefinitionId.
+ * Reemplaza a los flags legado del contexto (tieneAnalista, estaConforme,
+ * tieneRevisor, estaAprobado, esCaja): la visibilidad ya no se lee de la
+ * PropuestaNomina sino que se deriva del formulario BPA de la tarea.
+ *
+ * Analista y Caja no tienen user task en BPA, por lo que sus flags siempre
+ * son false para tareas del inbox BPA.
+ * TODO(arquitecto): pendiente #3 — confirmar si Caja tendrá user task BPA.
+ *
+ * @param {string} taskDefinitionId - activityId del TaskInstance BPA
+ * @returns {object} { esAnalista, esCoordinador, esApoderado, esLiberador, esCaja }
+ *
+ * Ejemplo:
+ *   calcularFlagsRol("form_aprobacionDelCoordinador_2")
+ *   → { esAnalista: false, esCoordinador: true, esApoderado: false,
+ *       esLiberador: false, esCaja: false }
+ */
+function calcularFlagsRol(taskDefinitionId) {
+    const nombre = resolverNombrePorTaskDefinitionId(taskDefinitionId);
+    return {
+        esAnalista   : nombre === "analista",     // siempre false — sin user task BPA
+        esCoordinador: nombre === "coordinador",
+        esApoderado  : nombre === "apoderado",
+        esLiberador  : nombre === "liberador",
+        esCaja       : nombre === "caja",         // siempre false — sin user task BPA
+    };
+}
+
+/**
  * Devuelve la configuración del proceso BPA asociado al rol.
  *
  * @param {string} nombreFuncional - clave del objeto PERFILES
@@ -381,4 +446,7 @@ module.exports = {
     resolverTaskDefinitionId,
     resolverProceso,
     resolverContextPath,
+    // Resolvers de visibilidad (bloque Refactoring Visibilidad)
+    resolverNombrePorTaskDefinitionId,
+    calcularFlagsRol,
 };
