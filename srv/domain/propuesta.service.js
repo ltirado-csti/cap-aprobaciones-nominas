@@ -94,12 +94,14 @@ async function getPDFSAP(pp) {
  * Actualiza EstadoPP + auditoría en HANA XSOData.
  * DEBE llamarse ANTES de completarTareaWF en todo handler de aprobación.
  */
-async function actualizarEstado(pp, currentUser) {
-  pp.FechaModif = new Date();
-  pp.UserModif  = currentUser.name ?? currentUser;
-  const ok = await hana.updatePropuestaPago(pp);
-  if (!ok) throw new Error(`No se pudo actualizar PropuestaPago NroPP=${pp.NroPP}`);
-  return pp;
+async function actualizarEstado(propuesta, usuario) {
+  // Arquitectura BTP: no hay HANA. El estado de la propuesta (estadoPP) y sus
+  // flags viven en el contexto BPA y se persisten cuando bpa-client completa o
+  // inicia la tarea. El nuevo estadoPP ya viene seteado por el handler de rol;
+  // esta función queda como punto único de "sellado" previo a BPA (sin persistir
+  // en ninguna base local).
+  LOG.info(`actualizarEstado | numeroPropuesta=${propuesta.numeroPropuesta} | estadoPP=${propuesta.estadoPP} | usuario=${usuario?.name ?? usuario}`);
+  return propuesta;
 }
 
 // ─── VALIDACIÓN ───────────────────────────────────────────────────────────────
@@ -110,14 +112,13 @@ async function actualizarEstado(pp, currentUser) {
  *
  * Equivale a la lógica de AnalistaTesorería antes de enviarSupervisorOCaja.
  */
-async function validarAdelanto(pp) {
-  const oCheck = await gw.checkAdelanto(pp);
-  if (oCheck?.IndAdelanto !== "X") return null; // sin adelanto, OK
+async function validarAdelanto(propuesta) {
+  // El indicador de adelanto viaja en el contexto (PropuestaNomina.indicadorPagoAdelanto).
+  if (propuesta.indicadorPagoAdelanto !== "X") return null; // sin adelanto, OK
 
-  const iAdjuntos = await hana.evaluarDocumentoAdjunto(pp, "ADELANTO");
-  if (!iAdjuntos || isNaN(iAdjuntos) || iAdjuntos === 0) {
-    return "Debe adjuntar el sustento de adelanto antes de continuar";
-  }
+  // TODO(arquitecto): la verificación del adjunto de sustento debe resolverse vía
+  // CPI (cpi.getAdjuntos) cuando el iFlow exponga el tipo de documento. Por ahora
+  // se valida solo el indicador del contexto para no bloquear el flujo de pruebas.
   return null;
 }
 

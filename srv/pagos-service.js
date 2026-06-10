@@ -38,6 +38,15 @@ function _handle(req, fn) {
   });
 }
 
+/**
+ * Enriquece los datos de la acción con el usuario autenticado.
+ * El dominio espera `usuario : { name }`; si el frontend no lo envía en el
+ * payload, se toma del contexto de seguridad CAP (req.user).
+ */
+function _conUsuario(req) {
+  return { ...req.data, usuario: req.data.usuario ?? { name: req.user?.id } };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // CLASE PRINCIPAL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -209,7 +218,7 @@ class PagosService extends cds.ApplicationService {
      * Enruta según viaPago: W → EN_CAJA, resto → VALIDACION
      */
     this.on("enviarSupervisorOCaja", (req) =>
-      _handle(req, () => aprobSvc.enviarSupervisorOCaja(req.data))
+      _handle(req, () => aprobSvc.enviarSupervisorOCaja(_conUsuario(req)))
     );
 
     /**
@@ -218,12 +227,12 @@ class PagosService extends cds.ApplicationService {
      */
     this.on("compensar", async (req) =>
       _handle(req, async () => {
-        const oDocCompensa = await cpiInfra.consultarCompensacion(req.data.propuesta);
-        if (!oDocCompensa) throw Object.assign(
+        const docCompensacion = await cpiInfra.consultarCompensacion(req.data.propuesta);
+        if (!docCompensacion) throw Object.assign(
           new Error("No se pudo obtener el documento de compensación desde SAP"),
           { status: 500 }
         );
-        return aprobSvc.compensar({ ...req.data, oDocCompensa });
+        return aprobSvc.compensar({ ..._conUsuario(req), docCompensacion });
       })
     );
 
@@ -232,7 +241,7 @@ class PagosService extends cds.ApplicationService {
      * OBS_SUPER → CERRADO_OB
      */
     this.on("cerrarPorObservacion", (req) =>
-      _handle(req, () => aprobSvc.cerrarPorObservacion(req.data))
+      _handle(req, () => aprobSvc.cerrarPorObservacion(_conUsuario(req)))
     );
 
     /**
@@ -240,7 +249,7 @@ class PagosService extends cds.ApplicationService {
      * GENERADO → ELIMINADO
      */
     this.on("eliminarDoc", (req) =>
-      _handle(req, () => aprobSvc.eliminarDoc(req.data))
+      _handle(req, () => aprobSvc.eliminarDoc(_conUsuario(req)))
     );
   }
 
@@ -252,7 +261,7 @@ class PagosService extends cds.ApplicationService {
      * Enruta según modalidadPP, viaPago y sociedades de revisión.
      */
     this.on("supervisorAprobar", (req) =>
-      _handle(req, () => aprobSvc.supervisorAprobar(req.data))
+      _handle(req, () => aprobSvc.supervisorAprobar(_conUsuario(req)))
     );
 
     /**
@@ -260,7 +269,7 @@ class PagosService extends cds.ApplicationService {
      * Cancela la instancia BPA completa. Solo disponible cuando puedeTerminarFlujo = true.
      */
     this.on("supervisorTerminarFlujo", (req) =>
-      _handle(req, () => aprobSvc.supervisorTerminarFlujo(req.data))
+      _handle(req, () => aprobSvc.supervisorTerminarFlujo(_conUsuario(req)))
     );
 
     /**
@@ -268,7 +277,7 @@ class PagosService extends cds.ApplicationService {
      * VALIDACION → OBS_SUPER (CPI: ZfiWsH2hObs, PiEstado=OBTR)
      */
     this.on("supervisorObservar", (req) =>
-      _handle(req, () => aprobSvc.supervisorObservar(req.data))
+      _handle(req, () => aprobSvc.supervisorObservar(_conUsuario(req)))
     );
 
     /**
@@ -276,7 +285,7 @@ class PagosService extends cds.ApplicationService {
      * Anula la propuesta. Solo disponible cuando puedeAnular = true.
      */
     this.on("supervisorAnular", (req) =>
-      _handle(req, () => aprobSvc.supervisorAnular(req.data))
+      _handle(req, () => aprobSvc.supervisorAnular(_conUsuario(req)))
     );
   }
 
@@ -288,7 +297,7 @@ class PagosService extends cds.ApplicationService {
      * REVISION → EN_FIRMA
      */
     this.on("revisorAprobar", (req) =>
-      _handle(req, () => aprobSvc.revisorAprobar(req.data))
+      _handle(req, () => aprobSvc.revisorAprobar(_conUsuario(req)))
     );
 
     /**
@@ -296,7 +305,7 @@ class PagosService extends cds.ApplicationService {
      * REVISION → OBS_REVISOR (CPI: ZfiWsH2hObs, PiEstado=OBRA)
      */
     this.on("revisorObservar", (req) =>
-      _handle(req, () => aprobSvc.revisorObservar(req.data))
+      _handle(req, () => aprobSvc.revisorObservar(_conUsuario(req)))
     );
   }
 
@@ -309,7 +318,7 @@ class PagosService extends cds.ApplicationService {
      * registrarAprobacionSAP (CPI /apoReg) se llama antes de completar BPA.
      */
     this.on("apoderadoFirmar", (req) =>
-      _handle(req, () => aprobSvc.apoderadoFirmar(req.data))
+      _handle(req, () => aprobSvc.apoderadoFirmar(_conUsuario(req)))
     );
 
     /**
@@ -317,7 +326,7 @@ class PagosService extends cds.ApplicationService {
      * EN_FIRMA → OBS_APODER (CPI: ZfiWsH2hObs, PiEstado=OBAP)
      */
     this.on("apoderadoObservar", (req) =>
-      _handle(req, () => aprobSvc.apoderadoObservar(req.data))
+      _handle(req, () => aprobSvc.apoderadoObservar(_conUsuario(req)))
     );
 
     /**
@@ -325,7 +334,7 @@ class PagosService extends cds.ApplicationService {
      * Redirige la firma a otro apoderado. El comentario contiene el email destino.
      */
     this.on("redirigirApoderado", (req) =>
-      _handle(req, () => aprobSvc.redirigirApoderado(req.data))
+      _handle(req, () => aprobSvc.redirigirApoderado(_conUsuario(req)))
     );
   }
 
@@ -337,7 +346,7 @@ class PagosService extends cds.ApplicationService {
      * EN_CAJA → PAGADO. Cierra el flujo BPA.
      */
     this.on("cajaConfirmarPago", (req) =>
-      _handle(req, () => aprobSvc.cajaConfirmarPago(req.data))
+      _handle(req, () => aprobSvc.cajaConfirmarPago(_conUsuario(req)))
     );
 
     /**
@@ -345,7 +354,7 @@ class PagosService extends cds.ApplicationService {
      * EN_CAJA → OBS_CAJA (CPI: ZfiWsH2hObs, PiEstado=OBCA)
      */
     this.on("cajaObservar", (req) =>
-      _handle(req, () => aprobSvc.cajaObservar(req.data))
+      _handle(req, () => aprobSvc.cajaObservar(_conUsuario(req)))
     );
   }
 }
@@ -380,6 +389,51 @@ class PagosService extends cds.ApplicationService {
   }
 
   /**
+   * Normaliza el contexto BPA a la propuesta de negocio, sin importar qué
+   * proceso lo haya producido. Los 3 procesos del .mtar anidan distinto:
+   *   - aprobacionDeNomina (principal)         → startEvent.propuesta
+   *   - aprobacionDeLosApoderados (subproceso) → startEvent.body
+   *   - aprobacionFinal (subproceso)           → startEvent.body
+   * Se prueban los paths conocidos en orden y se cae a fallbacks planos para
+   * tolerar contextos legados o variantes de readContext.
+   *
+   * @param {object} contexto - Contexto crudo devuelto por bpa.readContext
+   * @returns {object} Propuesta de negocio (camelCase de PropuestaNomina.json)
+   */
+  function _extraerPropuesta(contexto) {
+    if (!contexto || typeof contexto !== "object") return {};
+    const candidatos = [
+      contexto?.startEvent?.propuesta,   // proceso principal
+      contexto?.startEvent?.body,        // subprocesos (apoderados / final)
+      contexto?.propuesta,               // fallback plano
+      contexto?.body,                    // fallback plano
+    ];
+    const propuesta = candidatos.find(c => c && typeof c === "object");
+    return propuesta ?? contexto;
+  }
+
+  /**
+   * Mapea un contexto BPA al shape de TareasInbox SIN llamar a CPI.
+   * Usado por la ruta de $select liviano del READ (FCL pide solo campos de
+   * cabecera). Reutiliza _ensamblarDetalle con composiciones vacías para
+   * mantener una sola proyección de campos y flags.
+   *
+   * @param {string} instanceID - ID de la tarea BPA
+   * @param {object} contexto   - Contexto crudo de bpa.readContext
+   * @returns {object} Registro TareasInbox liviano (sin proveedores/adjuntos)
+   */
+  function _mapearContextoBpa(instanceID, contexto) {
+    const propuesta = _extraerPropuesta(contexto);
+    return _ensamblarDetalle({
+      instanceID,
+      propuesta,
+      proveedores : [],
+      adjuntos    : [],
+      aprobadores : [],
+    });
+  }
+
+  /**
    * Enriquece una tarea BPA con su contexto para el List Report.
    * @param {object} tarea - Tarea raw del BPA (getInboxTasks)
    * @returns {Promise<object>} TareasInbox con campos de negocio completos
@@ -387,7 +441,7 @@ class PagosService extends cds.ApplicationService {
   async function _enriquecerConContexto(tarea) {
     try {
       const contexto  = await bpa.readContext(tarea.id);
-      const propuesta = contexto?.startEvent?.propuesta ?? {};
+      const propuesta = _extraerPropuesta(contexto);
 
       return {
         instanceID         : tarea.id,
@@ -454,7 +508,7 @@ class PagosService extends cds.ApplicationService {
         );
       }
 
-      const propuesta = contexto.propuesta ?? contexto;
+      const propuesta = _extraerPropuesta(contexto);
 
       // Luego obtener las composiciones en paralelo usando las funciones privadas
       const [proveedores, adjuntos, aprobadores] = await Promise.all([
