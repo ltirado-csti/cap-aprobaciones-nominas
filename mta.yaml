@@ -1,75 +1,161 @@
 _schema-version: 3.3.0
 ID: cap-aprobacion-nomina
-description: A simple CAP project.
+description: H2H Aprobacion de Nomina - CAP + Fiori Elements
 version: 1.0.0
+
 modules:
-- name: cap-aprobacion-nomina-srv
-  type: nodejs
-  path: gen/srv
-  provides:
-  - name: srv-api
-    properties:
-      srv-url: ${default-url}
-  parameters:
-    buildpack: nodejs_buildpack
-    instances: 1
-  build-parameters:
-    builder: npm-ci
-- name: cap-aprobacion-nomina-app-content
-  type: com.sap.application.content
-  path: .
-  requires:
-  - name: cap-aprobacion-nomina-repo-host
+  # ----------------- BACKEND SERVICE MODULE -----------------
+  - name: cap-aprobacion-nomina-srv
+    type: nodejs
+    path: gen/srv
+    provides:
+      - name: srv-api
+        properties:
+          srv-url: ${default-url}
     parameters:
-      content-target: true
-  build-parameters:
-    build-result: resources
+      buildpack: nodejs_buildpack
+      instances: 1
+    build-parameters:
+      builder: npm-ci
     requires:
-    - artifacts:
-      - centriah2hppaprobacionesui5aprobaciones.zip
-      name: centriah2hppaprobacionesui5aprobaciones
-      target-path: resources/
-- name: centriah2hppaprobacionesui5aprobaciones
-  type: html5
-  path: app/ui5-aprobaciones
-  build-parameters:
-    build-result: dist
-    builder: custom
-    commands:
-    - npm install
-    - npm run build:cf
-    supported-platforms: []
-resources:
-- name: cap-aprobacion-nomina-repo-host
-  type: org.cloudfoundry.managed-service
-  parameters:
-    service: html5-apps-repo
-    service-name: cap-aprobacion-nomina-html5-service
-    service-plan: app-host
-- name: cap-aprobacion-nomina-destination-service
-  type: org.cloudfoundry.managed-service
-  parameters:
-    config:
-      HTML5Runtime_enabled: false
-      init_data:
+      - name: cap-aprobacion-nomina-auth
+      - name: cap-aprobacion-nomina-destination-service
+      - name: cap-aprobacion-nomina-connectivity
+
+  # ----------------- DESTINATIONS CONTENT -----------------
+  - name: cap-aprobacion-nomina-destinations
+    type: com.sap.application.content
+    path: .
+    build-parameters:
+      no-source: true
+    requires:
+      - name: cap-aprobacion-nomina-destination-service
+        parameters:
+          content-target: true
+      - name: cap-aprobacion-nomina-repo-host
+        parameters:
+          service-key:
+            name: cap-aprobacion-nomina-repo-host-key
+      - name: cap-aprobacion-nomina-auth
+        parameters:
+          service-key:
+            name: cap-aprobacion-nomina-auth-key
+      - name: srv-api
+    parameters:
+      content:
         instance:
-          destinations:
-          - Authentication: NoAuthentication
-            Name: ui5
-            ProxyType: Internet
-            Type: HTTP
-            URL: https://ui5.sap.com
           existing_destinations_policy: update
-      version: 1.0.0
-    service: destination
-    service-name: cap-aprobacion-nomina-destination-service
-    service-plan: lite
+          destinations:
+             # Destino URL al backend CAP.
+            # OAuth2UserTokenExchange: el managed approuter intercambia el token
+            # XSUAA del usuario logueado por un token válido para el backend CAP.
+            # URL dinámica: se resuelve al momento del deploy desde srv-api/srv-url.
+            - Authentication: OAuth2UserTokenExchange
+              Name: srv-api
+              TokenServiceInstanceName: cap-aprobacion-nomina-auth
+              TokenServiceKeyName: cap-aprobacion-nomina-auth-key
+              URL: ~{srv-api/srv-url}
+              sap.cloud.service: centria.h2hpp.aprobaciones
+
+            # Destino de servicio: html5-apps-repo.
+            # Permite que Build Work Zone encuentre y sirva la app Fiori.
+            - Name: cap-aprobacion-nomina-html5-repository
+              ServiceInstanceName: cap-aprobacion-nomina-html5-service
+              ServiceKeyName: cap-aprobacion-nomina-repo-host-key
+              sap.cloud.service: centria.h2hpp.aprobaciones
+
+            # Destino de servicio: XSUAA.
+            # Permite al managed approuter hacer token exchange contra esta instancia.
+            - Authentication: OAuth2UserTokenExchange
+              Name: cap-aprobacion-nomina-auth
+              ServiceInstanceName: cap-aprobacion-nomina-auth
+              ServiceKeyName: cap-aprobacion-nomina-auth-key
+              sap.cloud.service: centria.h2hpp.aprobaciones
+
+  # ----------------- UI DEPLOYER (APP CONTENT) -----------------
+  - name: cap-aprobacion-nomina-app-content
+    type: com.sap.application.content
+    path: .
+    requires:
+      - name: cap-aprobacion-nomina-repo-host
+        parameters:
+          content-target: true
+    build-parameters:
+      build-result: resources
+      requires:
+        - artifacts:
+            - centriah2hppaprobacionesui5aprobaciones.zip
+          name: centriah2hppaprobacionesui5aprobaciones
+          target-path: resources/
+
+  # ----------------- FIORI ELEMENT APPLICATION -----------------
+  - name: centriah2hppaprobacionesui5aprobaciones
+    type: html
+    path: app/ui5-aprobaciones
+    build-parameters:
+      build-result: dist
+      builder: custom
+      commands:
+        - npm install
+        - npm run build
+      supported-platforms: []
+
+resources:
+  # ----------------- REPOSITORY HOST -----------------
+  - name: cap-aprobacion-nomina-repo-host
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: html5-apps-repo
+      service-name: cap-aprobacion-nomina-html5-service
+      service-plan: app-host
+
+  # ----------------- DESTINATION SERVICE -----------------
+  - name: cap-aprobacion-nomina-destination-service
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: destination
+      service-name: cap-aprobacion-nomina-destination-service
+      service-plan: lite
+      config:
+        HTML5Runtime_enabled: true
+        init_data:
+          instance:
+            destinations:
+              - Authentication: NoAuthentication
+                Name: ui5
+                ProxyType: Internet
+                Type: HTTP
+                URL: https://ui5.sap.com
+            existing_destinations_policy: update
+        version: 1.0.0
+
+  # ----------------- XSUAA (SECURITY) -----------------
+  - name: cap-aprobacion-nomina-auth
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: xsuaa
+      service-plan: application
+      path: ./xs-security.json
+      config:
+        xsappname: cap-aprobacion-nomina-${org}-${space}
+        tenant-mode: dedicated
+        oauth2-configuration:
+          credential-types:
+            - binding-secret
+            - x509
+    # ----------------- CONNECTIVITY SERVICE -----------------
+  - name: cap-aprobacion-nomina-connectivity
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: connectivity
+      service-plan: lite
 parameters:
   deploy_mode: html5-repo
   enable-parallel-deployments: true
+
 build-parameters:
   before-all:
-  - builder: custom
-    commands:
-    - npm ci
-    - npx cds build --production
+    - builder: custom
+      commands:
+        - npm ci
+        - npx cds build --production

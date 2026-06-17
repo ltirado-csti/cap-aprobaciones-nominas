@@ -1,7 +1,5 @@
 {
-  "xsappname": "cap-aprobacion-nomina",
-  "tenant-mode": "dedicated",
-  "description": "Security profile of called application",
   "scopes": [],
+  "attributes": [],
   "role-templates": []
 }

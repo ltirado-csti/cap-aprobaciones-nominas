@@ -2,255 +2,180 @@
 /**
  * srv/config/perfiles.js
  *
- * Mapeo centralizado entre nombres funcionales del flujo BTP, códigos de
- * perfil SAP Payroll y la configuración de SAP Build Process Automation (BPA).
+ * Mapeo centralizado de roles del flujo BPA H2H Nómina.
  *
- * Fuente:
- *   - Códigos SAP: definición del arquitecto (ltirado@csticorp.biz)
- *       CO = Coordinador   (antes TR/SUPERVISOR en el legado)
- *       AP = Apoderado
- *       LI = Liberador     (pendiente confirmar: ¿equivale a RV/REVISOR o es nuevo nivel?)
- *       AN = Analista de Nómina
- *   - taskDefinitionId + decisions: extraídos del despliegue BPA H2H_Nomina_1_0_12.mtar
- *     y documentados en MAPEO_WORKFLOW_BPA.md.
+ * Contiene DOS tablas complementarias:
  *
- * REGLA: aprobacion.service.js siempre usa nombres funcionales (claves de este objeto).
- *        cpi-client.js recibe el código SAP (resolverCodigo) en el query param ?rol=XX
- *        y CPI lo pasa a Payroll (ECP) sin traducción. CPI es la única fachada:
- *        no hay sap-gateway-client ni acceso directo a Gateway/HANA.
- *        bpa-client.js recibe el taskDefinitionId y el decision resueltos aquí.
+ *   PERFILES  — códigos SAP Payroll (IpPerfil que CPI pasa a Payroll vía iFlow ZhrfApoReg).
+ *   ROLES_BPA — IDs de tareas BPA v1.1.0 (usados por aprobacion.service.js).
  *
- * ─────────────────────────────────────────────────────────────────────────────
- * HALLAZGOS DEL .mtar (3 procesos BPA):
- *   aprobacionDeNomina         → proceso principal. Trigger: iniciarAprobacionDeNomina.
- *                                Contexto anidado bajo startEvent.propuesta.
- *                                User task: Coordinador (form_aprobacionDelCoordinador_2).
- *   aprobacionDeLosApoderados  → subproceso paralelo de 2 firmas (F1/F2).
- *                                Contexto anidado bajo startEvent.body.
- *                                User tasks: form_aprobacionDelApoderado_1 / _2.
- *   aprobacionFinal            → proceso independiente. Trigger: aprobadorFinal.
- *                                Contexto anidado bajo startEvent.body.
- *                                User task: Liberador (form_aprobacionFinalForm_2).
+ * Principio de perfil por tarea (definitivo):
+ *   El rol pertenece a la TAREA, no al usuario.
+ *   La cadena es: Payroll resuelve emails → BPA asigna destinatario →
+ *   CAP filtra inbox por token XSUAA → taskDefinitionId define el rol via
+ *   calcularFlagsRol() → UI muestra los botones del rol correspondiente.
  *
- *   Solo Coordinador, Apoderados y Liberador tienen user task en BPA.
- *   Analista y Caja son 100% CAP (no completan tarea BPA — ver esTareaBpa).
+ * Estado BPA v1.1.5 (activos):
+ *   AP1  →  form_aprobacionDelApoderado_1
+ *   AP2  →  form_aprobacionDelApoderado_2
+ *   LI   →  form_aprobacionLiberadorFinal_1
  *
- * PENDIENTES DE ARQUITECTO (no resueltos en este bloque, marcados con TODO):
- *   1. ¿LI (Liberador) reemplaza a RV (Revisor) o es un nivel adicional?
- *   2. Loop de observación del Coordinador: ¿nueva instancia o mismo proceso?
- *   3. ¿Caja completa una user task en BPA o es 100% CAP? (asumido 100% CAP).
- *   4. definitionId cualificado del proceso aprobacionFinal (falta del BPA Studio).
- * ─────────────────────────────────────────────────────────────────────────────
+ * Estado BPA v1.1.5 (anulados — reservados para uso futuro):
+ *   CO   →  form_aprobacionDelCoordinador_2
  */
 
-// ─── PROCESOS BPA ────────────────────────────────────────────────────────────
-//
-// Configuración a nivel de proceso (no de rol):
-//   definitionId : ID cualificado del workflow para POST /v1/workflow-instances.
-//   trigger      : nombre del trigger declarado en BPA Studio (Triggers tab).
-//   contextPath  : dónde se anida la PropuestaNomina dentro del contexto BPA.
-//                  El principal usa "propuesta"; los demás usan "body".
-//
-const PROCESOS = {
-    aprobacionDeNomina: {
-        definitionId: "us30.centriah2hnominadevqas.h2hnomina.aprobacionDeNomina",
-        trigger     : "iniciarAprobacionDeNomina",
-        contextPath : "propuesta",
-    },
-    aprobacionDeLosApoderados: {
-        // Subproceso: se instancia desde el proceso principal, no se inicia directo.
-        definitionId: null,
-        trigger     : null,
-        contextPath : "body",
-    },
-    aprobacionFinal: {
-        // TODO(arquitecto): confirmar definitionId cualificado en BPA Studio → Triggers.
-        definitionId: null,
-        trigger     : "aprobadorFinal",
-        contextPath : "body",
-    },
-};
+// ─── TABLA 1: Códigos SAP Payroll ────────────────────────────────────────────
 
-// ─── PERFILES POR ROL ────────────────────────────────────────────────────────
 const PERFILES = {
     /**
-     * Analista de Nómina — arma el lote e INICIA la instancia del flujo.
-     * Legado: ANALISTA_T / AN  →  sin cambio de código.
-     * No completa user task en BPA: dispara iniciarInstancia(aprobacionDeNomina).
+     * Analista de Nómina — arma el lote y lo envía al flujo.
+     * Opera en Payroll; no tiene tarea visible en la Fiori app.
      */
     analista: {
-        codigo : "AN",
-        label  : "Analista de Nómina",
-        sufijo : "AT",   // sufijo del tituloTarea BPA
-        flagBpa: "tieneAnalista",
-        bpa: {
-            esTareaBpa      : false,                 // 100% CAP — inicia, no completa
-            proceso         : "aprobacionDeNomina",  // proceso que dispara al enviar
-            taskDefinitionId: null,
-            decisions       : {},                    // sin decisions: no hay user task
-            inicia          : true,                  // este rol inicia la instancia BPA
-        },
+        codigo: "AN",
+        label : "Analista de Nómina",
     },
 
     /**
-     * Coordinador — valida el lote y lo enruta al siguiente nivel.
-     * Legado: SUPERVISOR / TR  →  nuevo código CO.
-     * User task BPA del proceso principal aprobacionDeNomina.
+     * Coordinador — anulado en BPA v1.1.0. Reservado para uso futuro.
+     * Los objetos se conservan; no debe mostrarse en la UI.
      */
     coordinador: {
-        codigo : "CO",
-        label  : "Coordinador",
-        sufijo : "S",
-        flagBpa: "estaConforme",
-        bpa: {
-            esTareaBpa      : true,
-            proceso         : "aprobacionDeNomina",
-            taskDefinitionId: "form_aprobacionDelCoordinador_2",
-            // decisions del .mtar: aprobar | anular | observar (recipients: usuariosRevisores)
-            decisions       : {
-                aprobar : "aprobar",
-                anular  : "anular",
-                observar: "observar",
-            },
-            inicia          : false,
-        },
+        codigo: "CO",
+        label : "Coordinador",
+        activo: false,
     },
 
     /**
      * Apoderado — firma F1 y F2 en representación de la sociedad.
-     * Legado: APODERADO / AP  →  sin cambio de código.
-     * User task BPA del subproceso aprobacionDeLosApoderados (2 firmas paralelas).
-     * Dos taskDefinitionId según la firma; se resuelve por contadorFirma en runtime.
+     * Dos usuarios distintos: Apoderado1 y Apoderado2 (flujo paralelo en BPA).
      */
     apoderado: {
-        codigo : "AP",
-        label  : "Apoderado",
-        sufijo : "A",
-        flagBpa: "estaAprobado",
-        bpa: {
-            esTareaBpa      : true,
-            proceso         : "aprobacionDeLosApoderados",
-            // F1 = primera firma (contadorFirma 0), F2 = segunda firma (contadorFirma ≥ 1)
-            taskDefinitionId: {
-                firma1: "form_aprobacionDelApoderado_1",
-                firma2: "form_aprobacionDelApoderado_2",
-            },
-            // decisions del .mtar: aprobar | observar (recipients: usuarioApoderado)
-            // NOTA: la decision "reject" del Apoderado se eliminó del BPA.
-            decisions       : {
-                aprobar : "aprobar",
-                observar: "observar",
-            },
-            inicia          : false,
-        },
+        codigo: "AP",
+        label : "Apoderado",
+        activo: true,
     },
 
     /**
-     * Liberador Final — última aprobación del proceso independiente aprobacionFinal.
-     * Legado: REVISOR / RV  →  nuevo código LI (pendiente validación).
-     * User task BPA: form_aprobacionFinalForm_2 (recipients: usuarioApoderado).
-     * Sus decisions usan IDs en inglés (approve/reject/cancel), a diferencia de los
-     * otros formularios que usan español — inconsistencia heredada del .mtar.
+     * Liberador Final — aprobación definitiva sobre el proceso principal.
+     * Lee su contexto desde startEvent.propuesta (ruta del proceso raíz).
      */
     liberador: {
-        codigo : "LI",
-        label  : "Liberador Final",
-        sufijo : "L",
-        flagBpa: "tieneRevisor",   // provisional — ajustar según decisión del arquitecto
-        bpa: {
-            esTareaBpa      : true,
-            proceso         : "aprobacionFinal",
-            taskDefinitionId: "form_aprobacionFinalForm_2",
-            // decisions del .mtar: approve | reject | cancel (IDs en inglés)
-            // TODO(arquitecto): confirmar mapeo funcional si LI == RV (Revisor).
-            decisions       : {
-                aprobar : "approve",
-                rechazar: "reject",
-                anular  : "cancel",
-            },
-            inicia          : false,
-        },
+        codigo: "LI",
+        label : "Liberador Final",
+        activo: true,
     },
 
     /**
      * Caja — confirma pagos con vía de pago tipo W (ventanilla).
      * Código SAP pendiente de confirmar con el arquitecto.
-     * Asumido 100% CAP (sin user task BPA) — ver pendiente #3.
      */
     caja: {
-        codigo : "CA",
-        label  : "Caja",
-        sufijo : "C",
-        flagBpa: "esCaja",
-        bpa: {
-            esTareaBpa      : false,   // TODO(arquitecto): confirmar si Caja tiene user task
-            proceso         : "aprobacionDeNomina",
-            taskDefinitionId: null,
-            decisions       : {},
-            inicia          : false,
-        },
+        codigo: "CA",
+        label : "Caja",
+        activo: false,  // fuera del alcance de esta entrega
     },
 };
 
-// ─── FUNCIONES DE RESOLUCIÓN ─────────────────────────────────────────────────
+// ─── TABLA 2: Roles BPA v1.1.0 ───────────────────────────────────────────────
+// Vincula cada taskDefinitionId de BPA al rol funcional y sus reglas.
+// Usada por aprobacion.service.js y pagos-service.js.
+
+const ROLES_BPA = {
+    /**
+     * Primer Apoderado — subproceso paralelo de aprobación.
+     * Contexto: startEvent.body (subproceso de Apoderados).
+     * Decisiones válidas: aprobar | observar.
+     * IpPerfil para CPI: "AP"
+     * Campo propuesta que contiene su email: usuarioApoderado1
+     */
+    apoderado1: {
+        taskDefinitionId: "form_aprobacionDelApoderado_1",
+        decisiones      : ["aprobar", "observar"],
+        contextPath     : "startEvent.body",
+        perfilCPI       : "AP",
+        campoPropuesta  : "usuarioApoderado1",
+        activo          : true,
+    },
+
+    /**
+     * Segundo Apoderado — subproceso paralelo de aprobación.
+     * Contexto: startEvent.body (subproceso de Apoderados).
+     * Decisiones válidas: aprobar | observar.
+     * IpPerfil para CPI: "AP"
+     * Campo propuesta que contiene su email: usuarioApoderado2
+     */
+    apoderado2: {
+        taskDefinitionId: "form_aprobacionDelApoderado_2",
+        decisiones      : ["aprobar", "observar"],
+        contextPath     : "startEvent.body",
+        perfilCPI       : "AP",
+        campoPropuesta  : "usuarioApoderado2",
+        activo          : true,
+    },
+
+    /**
+     * Liberador Final — proceso principal (aprobacionDeNomina).
+     * Contexto: startEvent.propuesta (proceso raíz, no subproceso).
+     * Decisiones válidas: liberar | rechazar | anular.
+     * IpPerfil para CPI: "LI"
+     * Campo propuesta que contiene su email: usuarioLiberador
+     */
+    liberador: {
+        taskDefinitionId: "form_aprobacionLiberadorFinal_1",
+        decisiones      : ["liberar", "rechazar", "anular"],
+        contextPath     : "startEvent.propuesta",
+        perfilCPI       : "LI",
+        campoPropuesta  : "usuarioLiberador",
+        activo          : true,
+    },
+
+    /**
+     * Coordinador — ANULADO en BPA v1.1.0. Reservado para uso futuro.
+     * Los objetos se conservan; activo: false evita que se use en la UI.
+     * taskDefinitionId obsoleto: no debe aparecer en el flujo activo.
+     */
+    coordinador: {
+        taskDefinitionId: "form_aprobacionDelCoordinador_2",
+        decisiones      : ["aprobar", "rechazar"],
+        contextPath     : "startEvent.body",
+        perfilCPI       : "CO",
+        campoPropuesta  : "usuarioCoordinador",
+        activo          : false,  // anulado — reservado para uso futuro
+    },
+};
+
+// ─── IDs OBSOLETOS (retenidos en BPA Studio, fuera del flujo activo) ────────
+// No deben usarse en ningún handler activo.
+const TASK_IDS_OBSOLETOS = [
+    "form_aprobacionFinalForm_2",      // aprobacionFinal (proceso eliminado)
+    "form_aprobacionDelCoordinador_2", // coordinador (anulado en v1.1.0)
+];
+
+// ─── FUNCIONES DE RESOLUCIÓN — PERFILES SAP ──────────────────────────────────
 
 /**
- * Obtiene el perfil completo o lanza error si el nombre funcional no existe.
- * Helper interno reutilizado por el resto de resolvers.
+ * Resuelve el código SAP a partir del nombre funcional.
+ * El código es el literal IpPerfil que CPI envía a Payroll en el iFlow ZhrfApoReg.
+ * CAP no llama a Payroll directamente: toda comunicación pasa por CPI.
  *
  * @param {string} nombreFuncional - clave del objeto PERFILES
- * @returns {object} perfil completo
- * @throws {Error} si el nombre funcional no existe
+ * @returns {string} código de dos letras para Payroll (AN, CO, AP, LI, CA)
+ * @throws {Error} si el nombre funcional no existe en PERFILES
+ *
+ * Ejemplo:
+ *   resolverCodigo("coordinador")  → "CO"
+ *   resolverCodigo("apoderado")    → "AP"
  */
-function _perfil(nombreFuncional) {
+function resolverCodigo(nombreFuncional) {
     const perfil = PERFILES[nombreFuncional];
     if (!perfil) {
         throw new Error(
             `Perfil desconocido: "${nombreFuncional}". ` +
-            `Valores válidos: ${Object.keys(PERFILES).join(", ")}`
+            `Válidos: ${Object.keys(PERFILES).join(", ")}`
         );
     }
-    return perfil;
-}
-
-/**
- * Resuelve el código SAP a partir del nombre funcional.
- * Usado por sap-gateway-client.js antes de llamar a CPI.
- *
- * @param {string} nombreFuncional - clave del objeto PERFILES
- * @returns {string} código de dos letras para Payroll (AN, CO, AP, LI, CA)
- *
- * Ejemplo:
- *   resolverCodigo("coordinador")  → "CO"
- */
-function resolverCodigo(nombreFuncional) {
-    return _perfil(nombreFuncional).codigo;
-}
-
-/**
- * Resuelve el sufijo del tituloTarea a partir del nombre funcional.
- * El tituloTarea en BPA sigue el formato: "Sociedad-NroPP-Banco-Fecha-Sufijo"
- * Ejemplo: "0025-R4603-BCP-20/05/2026-A"
- *
- * @param {string} nombreFuncional - clave del objeto PERFILES
- * @returns {string} sufijo de una o dos letras para el tituloTarea BPA
- */
-function resolverSufijo(nombreFuncional) {
-    return _perfil(nombreFuncional).sufijo;
-}
-
-/**
- * Resuelve el flag BPA a partir del nombre funcional.
- * Usado al construir o evaluar el contexto PropuestaNomina.json.
- *
- * @param {string} nombreFuncional - clave del objeto PERFILES
- * @returns {string} nombre del flag en el contexto BPA
- *
- * Ejemplo:
- *   resolverFlagBpa("coordinador")  → "estaConforme"
- */
-function resolverFlagBpa(nombreFuncional) {
-    return _perfil(nombreFuncional).flagBpa;
+    return perfil.codigo;
 }
 
 /**
@@ -259,6 +184,10 @@ function resolverFlagBpa(nombreFuncional) {
  *
  * @param {string} codigoSAP - código de dos letras (AN, CO, AP, LI, CA)
  * @returns {string|null} nombre funcional o null si no se encuentra
+ *
+ * Ejemplo:
+ *   resolverNombre("AP")  → "apoderado"
+ *   resolverNombre("LI")  → "liberador"
  */
 function resolverNombre(codigoSAP) {
     const entrada = Object.entries(PERFILES)
@@ -266,187 +195,148 @@ function resolverNombre(codigoSAP) {
     return entrada ? entrada[0] : null;
 }
 
-// ─── RESOLVERS BPA (nuevos en este bloque) ───────────────────────────────────
+// ─── FUNCIONES DE RESOLUCIÓN — ROLES BPA ────────────────────────────────────
 
 /**
- * Indica si el rol completa una user task en BPA.
- * Los roles 100% CAP (analista, caja) devuelven false.
+ * Calcula los flags de visibilidad de rol a partir del taskDefinitionId.
+ * Es la función central que la UI consume para mostrar/ocultar botones.
  *
- * @param {string} nombreFuncional - clave del objeto PERFILES
- * @returns {boolean}
+ * El rol pertenece a la TAREA: un mismo usuario puede ser Apoderado en
+ * una propuesta y Liberador en otra, dependiendo del taskDefinitionId
+ * que BPA le asignó.
  *
- * Ejemplo:
- *   esTareaBpa("coordinador") → true
- *   esTareaBpa("analista")    → false
- */
-function esTareaBpa(nombreFuncional) {
-    return _perfil(nombreFuncional).bpa.esTareaBpa === true;
-}
-
-/**
- * Indica si el rol INICIA la instancia del flujo (en lugar de completar una tarea).
- * Hoy solo el Analista inicia (POST /v1/workflow-instances).
- *
- * @param {string} nombreFuncional - clave del objeto PERFILES
- * @returns {boolean}
- */
-function inicia(nombreFuncional) {
-    return _perfil(nombreFuncional).bpa.inicia === true;
-}
-
-/**
- * Resuelve el ID de decision BPA que se envía en PATCH /v1/task-instances/{id}.
- * Traduce la acción funcional (aprobar|observar|anular|rechazar) al ID real del
- * formulario BPA, que difiere entre procesos (español vs. inglés).
- *
- * @param {string} nombreFuncional - clave del objeto PERFILES
- * @param {string} accionFuncional - "aprobar" | "observar" | "anular" | "rechazar"
- * @returns {string} ID de decision tal como lo espera el formulario BPA
- * @throws {Error} si el rol no tiene esa decision (ej. Apoderado no tiene "anular")
- *
- * Ejemplos:
- *   resolverDecision("coordinador", "aprobar")  → "aprobar"
- *   resolverDecision("liberador",   "aprobar")  → "approve"
- *   resolverDecision("liberador",   "anular")   → "cancel"
- */
-function resolverDecision(nombreFuncional, accionFuncional) {
-    const { decisions, label } = _perfil(nombreFuncional).bpa;
-    const decision = decisions[accionFuncional];
-    if (!decision) {
-        throw new Error(
-            `El perfil "${nombreFuncional}" (${label ?? ""}) no define la decision ` +
-            `"${accionFuncional}". Decisions válidas: ${Object.keys(decisions).join(", ") || "(ninguna)"}`
-        );
-    }
-    return decision;
-}
-
-/**
- * Resuelve el taskDefinitionId del formulario BPA del rol.
- * Para el Apoderado, que tiene dos formularios (F1/F2), se elige según la firma.
- *
- * @param {string} nombreFuncional - clave del objeto PERFILES
- * @param {object} [opts]          - { firma: 1 | 2 } solo relevante para apoderado
- * @returns {string|null} taskDefinitionId o null si el rol no tiene user task
- *
- * Ejemplos:
- *   resolverTaskDefinitionId("coordinador")            → "form_aprobacionDelCoordinador_2"
- *   resolverTaskDefinitionId("apoderado", { firma: 1 }) → "form_aprobacionDelApoderado_1"
- *   resolverTaskDefinitionId("apoderado", { firma: 2 }) → "form_aprobacionDelApoderado_2"
- */
-function resolverTaskDefinitionId(nombreFuncional, opts = {}) {
-    const tdi = _perfil(nombreFuncional).bpa.taskDefinitionId;
-    if (!tdi) return null;
-    if (typeof tdi === "string") return tdi;
-    // Objeto firma1/firma2 (apoderado): firma 2 = segunda firma; el resto = primera
-    return opts.firma >= 2 ? tdi.firma2 : tdi.firma1;
-}
-
-/**
- * Resuelve el nombre funcional del rol a partir del taskDefinitionId de la tarea.
- * El campo activityId del TaskInstance (GET /v1/task-instances) trae el ID del
- * formulario BPA (ej. "form_aprobacionDelCoordinador_2"). En algunos despliegues
- * puede venir cualificado, por eso se compara también por sufijo.
- *
- * Es la base del refactoring de visibilidad: la visibilidad de botones depende
- * de QUÉ tarea es (taskDefinitionId), no del estado de la propuesta en contexto.
- *
- * @param {string} taskDefinitionId - activityId del TaskInstance BPA
- * @returns {string|null} nombre funcional ("coordinador" | "apoderado" | "liberador") o null
- *
- * Ejemplos:
- *   resolverNombrePorTaskDefinitionId("form_aprobacionDelCoordinador_2") → "coordinador"
- *   resolverNombrePorTaskDefinitionId("form_aprobacionDelApoderado_1")   → "apoderado"
- *   resolverNombrePorTaskDefinitionId("form_aprobacionFinalForm_2")      → "liberador"
- *   resolverNombrePorTaskDefinitionId("otro_formulario")                 → null
- */
-function resolverNombrePorTaskDefinitionId(taskDefinitionId) {
-    if (!taskDefinitionId) return null;
-
-    for (const [nombre, perfil] of Object.entries(PERFILES)) {
-        const tdi = perfil.bpa.taskDefinitionId;
-        if (!tdi) continue;
-
-        // taskDefinitionId simple (coordinador, liberador) u objeto firma1/firma2 (apoderado)
-        const candidatos = typeof tdi === "string" ? [tdi] : Object.values(tdi);
-
-        const coincide = candidatos.some(id =>
-            taskDefinitionId === id || taskDefinitionId.endsWith(id)
-        );
-        if (coincide) return nombre;
-    }
-    return null;
-}
-
-/**
- * Calcula los flags de visibilidad por rol a partir del taskDefinitionId.
- * Reemplaza a los flags legado del contexto (tieneAnalista, estaConforme,
- * tieneRevisor, estaAprobado, esCaja): la visibilidad ya no se lee de la
- * PropuestaNomina sino que se deriva del formulario BPA de la tarea.
- *
- * Analista y Caja no tienen user task en BPA, por lo que sus flags siempre
- * son false para tareas del inbox BPA.
- * TODO(arquitecto): pendiente #3 — confirmar si Caja tendrá user task BPA.
- *
- * @param {string} taskDefinitionId - activityId del TaskInstance BPA
- * @returns {object} { esAnalista, esCoordinador, esApoderado, esLiberador, esCaja }
- *
- * Ejemplo:
- *   calcularFlagsRol("form_aprobacionDelCoordinador_2")
- *   → { esAnalista: false, esCoordinador: true, esApoderado: false,
- *       esLiberador: false, esCaja: false }
+ * @param {string} taskDefinitionId - valor del campo definitionId de la tarea BPA
+ * @returns {{
+ *   esApoderado1  : boolean,
+ *   esApoderado2  : boolean,
+ *   esApoderado   : boolean,  // esApoderado1 || esApoderado2
+ *   esLiberador   : boolean,
+ *   esCoordinador : boolean   // siempre false en el flujo activo
+ * }}
  */
 function calcularFlagsRol(taskDefinitionId) {
-    const nombre = resolverNombrePorTaskDefinitionId(taskDefinitionId);
+    // Extraer el segmento anterior al '@' que incluye BPA: "form_xxx@definitionId"
+    const idNormalizado = (taskDefinitionId || "").split("@")[0];
+
+    const entrada = Object.entries(ROLES_BPA).find(
+        ([, rol]) => rol.taskDefinitionId === idNormalizado
+    );
+
+    if (!entrada) {
+        return {
+            esApoderado1  : false,
+            esApoderado2  : false,
+            esApoderado   : false,
+            esLiberador   : false,
+            esCoordinador : false,
+        };
+    }
+
+    const [nombre, rol] = entrada;
+
+    // Coordinador anulado: nunca retorna true aunque se encuentre el ID
+    if (!rol.activo) {
+        return {
+            esApoderado1  : false,
+            esApoderado2  : false,
+            esApoderado   : false,
+            esLiberador   : false,
+            esCoordinador : false,
+        };
+    }
+
+    const esAp1 = nombre === "apoderado1";
+    const esAp2 = nombre === "apoderado2";
+
     return {
-        esAnalista   : nombre === "analista",     // siempre false — sin user task BPA
-        esCoordinador: nombre === "coordinador",
-        esApoderado  : nombre === "apoderado",
-        esLiberador  : nombre === "liberador",
-        esCaja       : nombre === "caja",         // siempre false — sin user task BPA
+        esApoderado1  : esAp1,
+        esApoderado2  : esAp2,
+        esApoderado   : esAp1 || esAp2,  // flag combinado para botones compartidos
+        esLiberador   : nombre === "liberador",
+        esCoordinador : false,            // siempre false en flujo activo v1.1.0
     };
 }
 
 /**
- * Devuelve la configuración del proceso BPA asociado al rol.
+ * Devuelve el rol BPA completo a partir del taskDefinitionId.
+ * Usado internamente por aprobacion.service.js para leer decisiones y ruta.
  *
- * @param {string} nombreFuncional - clave del objeto PERFILES
- * @returns {object} entrada de PROCESOS (definitionId, trigger, contextPath)
+ * @param {string} taskDefinitionId
+ * @returns {{ taskDefinitionId, decisiones, contextPath, perfilCPI, campoPropuesta, activo } | null}
  */
-function resolverProceso(nombreFuncional) {
-    const nombreProceso = _perfil(nombreFuncional).bpa.proceso;
-    return PROCESOS[nombreProceso] ?? null;
+function resolverRolBpa(taskDefinitionId) {
+    const idNormalizado = (taskDefinitionId || "").split("@")[0];
+    const entrada = Object.entries(ROLES_BPA).find(
+        ([, rol]) => rol.taskDefinitionId === idNormalizado
+    );
+    return entrada ? entrada[1] : null;
 }
 
 /**
- * Resuelve el contextPath donde se anida la PropuestaNomina para un proceso.
- * Centraliza la diferencia "propuesta" (principal) vs. "body" (subprocesos).
+ * Devuelve la ruta de contexto BPA para leer la PropuestaNomina.
  *
- * @param {string} nombreProceso - clave del objeto PROCESOS
- * @returns {string} "propuesta" | "body"
+ * Apoderados:  "startEvent.body"     (subproceso paralelo)
+ * Liberador:   "startEvent.propuesta" (proceso raíz)
+ * Coordinador: "startEvent.body"     (anulado — reservado)
+ *
+ * @param {string} taskDefinitionId
+ * @returns {string} ruta de contexto
+ * @throws {Error} si el taskDefinitionId no está registrado
  */
-function resolverContextPath(nombreProceso) {
-    return PROCESOS[nombreProceso]?.contextPath ?? "propuesta";
+function resolverContextPath(taskDefinitionId) {
+    const rol = resolverRolBpa(taskDefinitionId);
+    if (!rol) {
+        throw new Error(`taskDefinitionId desconocido: "${taskDefinitionId}"`);
+    }
+    return rol.contextPath;
+}
+
+/**
+ * Devuelve el literal IpPerfil para el iFlow ZhrfApoReg de CPI.
+ * BPA lo pasa directamente via ActionTask; CAP lo usa solo para validación.
+ *
+ * @param {string} taskDefinitionId
+ * @returns {string} "AP" | "LI" | "CO"
+ * @throws {Error} si el taskDefinitionId no está registrado
+ */
+function resolverPerfilCPI(taskDefinitionId) {
+    const rol = resolverRolBpa(taskDefinitionId);
+    if (!rol) {
+        throw new Error(`taskDefinitionId desconocido: "${taskDefinitionId}"`);
+    }
+    return rol.perfilCPI;
+}
+
+/**
+ * Valida que la decisión sea válida para el taskDefinitionId dado.
+ * Protección anti-tampering: evita que el cliente inyecte decisiones inválidas.
+ *
+ * @param {string} taskDefinitionId
+ * @param {string} decision
+ * @returns {boolean}
+ */
+function esDecisionValida(taskDefinitionId, decision) {
+    const rol = resolverRolBpa(taskDefinitionId);
+    if (!rol || !rol.activo) return false;
+    return rol.decisiones.includes(decision);
 }
 
 // ─── EXPORTACIONES ───────────────────────────────────────────────────────────
 
 module.exports = {
+    // Tablas (solo lectura)
     PERFILES,
-    PROCESOS,
-    // Resolvers SAP (existentes)
+    ROLES_BPA,
+    TASK_IDS_OBSOLETOS,
+
+    // Resolución SAP Payroll
     resolverCodigo,
-    resolverSufijo,
-    resolverFlagBpa,
     resolverNombre,
-    // Resolvers BPA (nuevos en este bloque)
-    esTareaBpa,
-    inicia,
-    resolverDecision,
-    resolverTaskDefinitionId,
-    resolverProceso,
-    resolverContextPath,
-    // Resolvers de visibilidad (bloque Refactoring Visibilidad)
-    resolverNombrePorTaskDefinitionId,
+
+    // Resolución BPA
     calcularFlagsRol,
+    resolverRolBpa,
+    resolverContextPath,
+    resolverPerfilCPI,
+    esDecisionValida,
 };

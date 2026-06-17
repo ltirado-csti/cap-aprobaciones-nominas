@@ -45,3 +45,10 @@ builder:
         debug: true
         transformModulesToUI5:
           overridesToOverride: true
+  resources:
+    excludes:
+      - "/test/**"
+      - "/localService/**"
+resources:
+  configuration:
+    propertiesFileSourceEncoding: UTF-8

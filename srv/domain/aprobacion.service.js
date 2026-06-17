@@ -1,369 +1,320 @@
 "use strict";
 /**
- * domain/aprobacion.service.js
+ * srv/domain/aprobacion.service.js
  *
- * Lógica de dominio del flujo de aprobación de la Propuesta de Pago.
- * Orquesta las decisiones de cada rol y delega TODA llamada externa en los
- * clientes de infraestructura. CPI es la única fachada de integración (no hay
- * HANA Cloud ni SAP Gateway: el estado, los usuarios por rol y el contador de
- * firmas viajan en el propio objeto PropuestaNomina del contexto BPA).
+ * Handlers de las acciones bound de TareasInbox (aprobación de nómina).
  *
- * Modelo de datos:
- *   - "propuesta" (tipo PropuestaNomina, camelCase) es a la vez los datos y el
- *     contexto del flujo. El handler de rol modifica propuesta.estadoPP y sus
- *     flags, y al completar/iniciar la tarea BPA se envía como contexto.
+ * Roles activos BPA v1.1.5:
+ *   Apoderado1 / Apoderado2: aprobar | observar   (contexto: startEvent.body)
+ *   Liberador:               liberar | rechazar | anular  (contexto: startEvent.propuesta)
  *
- * Depende de (arquitectura H2H BTP):
- *   infrastructure/cpi-client → registrarAprobacionSAP, registrarObservacionSAP
- *   infrastructure/bpa-client → iniciarInstancia, completarTarea, cerrarFlujo
- *   domain/propuesta.service  → actualizarEstado, validarAdelanto
- *   config/perfiles           → resolverDecision, esTareaBpa, resolverProceso
+ * Coordinador: ANULADO en BPA v1.1.0 — acciones conservadas, nunca invocadas en producción.
  *
- * Alineación BPA (.mtar H2H_Nomina_1_0_12):
- *   - Cada acción se completa con la "decision" real del formulario BPA
- *     (perfiles.resolverDecision). Solo Coordinador, Apoderado y Liberador
- *     completan user task; Analista y Caja son 100% CAP (el Analista inicia).
+ * Principio anti-tampering (CRÍTICO):
+ *   - instanceID  → siempre de req.params    (nunca del body del cliente)
+ *   - propuesta   → siempre de leerContexto  (BPA es fuente de verdad)
+ *   - usuario     → siempre de req.user.id   (XSUAA, no modificable por el cliente)
+ *   - comentario  → único campo aceptado del cliente
  *
- * SUPUESTOS a validar con el arquitecto (marcados TODO):
- *   - usuarioSAP para los payloads CPI (apoReg/obs) = usuario.name autenticado.
- *   - Validación de rol del usuario actual: delegada a XSUAA/@restrict (ya no se
- *     consulta a SAP).
- *   - Flujo CAR (checkPerfilSAP): enrutamiento simplificado pendiente de definir.
- *   - Notificaciones por correo: las gestiona BPA de forma autónoma (no CAP).
+ * CAP NO llama a CPI para registrar la decisión.
+ * BPA ejecuta el ActionTask ZhrfApoReg que llama a CPI directamente.
  */
 
-const cpi             = require("../infrastructure/cpi-client");
-const bpa             = require("../infrastructure/bpa-client");
-const propuestaService = require("./propuesta.service");
-const perfiles        = require("../config/perfiles");
-const cds             = require("@sap/cds");
-const LOG             = cds.log("aprobacion.service");
+const cds      = require("@sap/cds");
+const perfiles  = require("../config/perfiles");
+const bpaClient  = require("../infrastructure/bpa-client");
 
-// ─── HELPERS INTERNOS ────────────────────────────────────────────────────────
+const LOG = cds.log("aprobacion-service");
 
-/**
- * Construye el tituloTarea actualizado.
- * Formato verificado en contexto: "0025-R4603-BCP-20/05/2026-R"
- * El sufijo es la posición [4]: AT|S|R|A|C
- */
-function _buildTituloTarea(tituloActual, sufijo) {
-  if (!tituloActual) return "";
-  const partes = tituloActual.split("-");
-  partes[4] = sufijo;
-  return partes.join("-");
-}
+// =============================================================================
+// FUNCIÓN CENTRAL: _prepararAccion
+// Extrae y valida todos los datos necesarios antes de completar una tarea BPA.
+// El cliente solo puede enviar el campo "comentario".
+// =============================================================================
 
 /**
- * Anida la PropuestaNomina bajo el path de contexto que espera el proceso BPA.
- * startEvent.propuesta (principal) vs startEvent.body (subprocesos).
- * Único punto a ajustar si BPA esperara otra forma de contexto.
- */
-function _anidarContexto(perfilFuncional, propuesta) {
-  const proceso = perfiles.resolverProceso(perfilFuncional);
-  const path    = proceso?.contextPath ?? "propuesta";
-  return { startEvent: { [path]: propuesta } };
-}
-
-/**
- * Ejecuta una acción sobre una tarea BPA existente.
- * Orden: actualizarEstado → completarTarea con la decision real.
- * Solo completa user task si el rol la tiene (perfiles.esTareaBpa);
- * Analista y Caja (100% CAP) omiten el complete.
+ * Prepara el contexto completo de una acción de aprobación.
+ * Aplica el principio anti-tampering: todos los datos sensibles se derivan
+ * del token XSUAA y del contexto BPA, nunca del body del cliente.
  *
- * @param {object} opts
- *   propuesta       : PropuestaNomina (con estadoPP/flags ya actualizados)
- *   usuario         : { name }
- *   taskId          : ID de la user task BPA
- *   perfil          : perfil funcional (coordinador|apoderado|liberador|...)
- *   accionFuncional : "aprobar" | "observar" | "anular" | "rechazar"
+ * @param {import('@sap/cds').Request} req - Request CAP
+ * @param {string} decision - decisión BPA a aplicar (ej: "aprobar", "liberar")
+ * @returns {Promise<{
+ *   instanceID  : string,
+ *   propuesta   : import('./config/perfiles').PropuestaNomina,
+ *   usuario     : string,
+ *   comentario  : string,
+ *   taskDefId   : string,
+ *   rolBpa      : object,
+ *   flags       : object
+ * }>}
  */
-async function _ejecutar({ propuesta, usuario, taskId, perfil, accionFuncional }) {
-  // 1. Sellar el estado (vive en el contexto; no se persiste en base local)
-  await propuestaService.actualizarEstado(propuesta, usuario);
+async function _prepararAccion(req, decision) {
+    // 1. Clave de la tarea desde los parámetros de ruta OData (nunca del body)
+    const instanceID = req.params?.[0]?.instanceID ?? req.params?.[0];
+    if (!instanceID) {
+        return req.error(400, "Falta el identificador de tarea (instanceID)");
+    }
 
-  // 2. Completar la user task BPA — solo si el rol tiene tarea en BPA
-  if (perfiles.esTareaBpa(perfil)) {
-    const decision    = perfiles.resolverDecision(perfil, accionFuncional);
-    const contextoBpa = _anidarContexto(perfil, propuesta);
-    const resultado   = await bpa.completarTarea(taskId, { decision, contexto: contextoBpa });
-    if (!resultado.success) throw new Error(resultado.mensaje);
-    return resultado;
-  }
+    // 2. Leer la tarea BPA para obtener el taskDefinitionId real
+    let tareaBpa;
+    try {
+        tareaBpa = await bpaClient.leerTarea(instanceID);
+    } catch (err) {
+        LOG.error(`_prepararAccion | leerTarea falló | instanceID=${instanceID}`, err.message);
+        return req.error(502, "No se pudo consultar la tarea en BPA Workflow");
+    }
 
-  // Rol 100% CAP (analista/caja): no completa user task BPA.
-  LOG.info(`_ejecutar | rol CAP "${perfil}" sin user task BPA — se omite complete`);
-  return { success: true, mensaje: "Acción completada (rol sin user task BPA)" };
+    // Normalizar el taskDefinitionId (BPA puede devolverlo como "form_xxx@defId")
+    const taskDefId = (tareaBpa.definitionId || "").split("@")[0];
+
+    // 3. Resolver el rol a partir del taskDefinitionId (la fuente de verdad)
+    const rolBpa = perfiles.resolverRolBpa(taskDefId);
+    if (!rolBpa || !rolBpa.activo) {
+        LOG.error(`_prepararAccion | rol inactivo o desconocido | taskDefId=${taskDefId}`);
+        return req.error(403, "Esta tarea no corresponde a un rol activo en el flujo de aprobación");
+    }
+
+    // 4. Validar que la decisión es válida para este rol (anti-tampering)
+    if (!perfiles.esDecisionValida(taskDefId, decision)) {
+        LOG.error(`_prepararAccion | decisión inválida | decision=${decision} taskDefId=${taskDefId}`);
+        return req.error(400, `La decisión "${decision}" no es válida para este rol`);
+    }
+
+    // 5. Leer el contexto de la propuesta desde BPA (ruta según el rol)
+    let propuesta;
+    try {
+        const contextoCompleto = await bpaClient.leerContexto(instanceID);
+        propuesta = _navegarRuta(contextoCompleto, rolBpa.contextPath);
+    } catch (err) {
+        LOG.error(`_prepararAccion | leerContexto falló | instanceID=${instanceID}`, err.message);
+        return req.error(502, "No se pudo leer el contexto de la propuesta en BPA");
+    }
+
+    if (!propuesta) {
+        return req.error(502, `La propuesta no existe en la ruta de contexto: ${rolBpa.contextPath}`);
+    }
+
+    // 6. Usuario autenticado desde XSUAA (única fuente de verdad del firmante)
+    const usuario = req.user.id;
+
+    // 7. Comentario: único dato aceptado del cliente
+    const comentario = (req.data?.comentario ?? "").trim();
+
+    // 8. Calcular flags de rol (para logs y respuesta)
+    const flags = perfiles.calcularFlagsRol(taskDefId);
+
+    LOG.info(
+        `_prepararAccion OK | instanceID=${instanceID} usuario=${usuario} ` +
+        `rol=${taskDefId} decision=${decision}`
+    );
+
+    return { instanceID, propuesta, usuario, comentario, taskDefId, rolBpa, flags };
 }
+
+// =============================================================================
+// FUNCIÓN INTERNA: _navegarRuta
+// Accede a una ruta anidada en el objeto de contexto BPA.
+// Ejemplo: "startEvent.body" → contexto.startEvent.body
+// =============================================================================
 
 /**
- * Inicia una nueva instancia de workflow BPA (lo hace el Analista al enviar el lote).
- * El Analista no tiene user task: arranca el proceso aprobacionDeNomina.
+ * Navega un objeto JSON siguiendo una ruta con puntos.
+ *
+ * @param {object} objeto - objeto raíz
+ * @param {string} ruta   - ruta separada por puntos (ej: "startEvent.propuesta")
+ * @returns {any}
  */
-async function _iniciarFlujo({ propuesta, usuario, perfil = "analista" }) {
-  await propuestaService.actualizarEstado(propuesta, usuario);
-
-  const proceso     = perfiles.resolverProceso(perfil);
-  const contextoBpa = _anidarContexto(perfil, propuesta);
-
-  const resultado = await bpa.iniciarInstancia(proceso?.definitionId, contextoBpa);
-  if (!resultado.success) throw new Error(resultado.mensaje);
-
-  LOG.info(`_iniciarFlujo OK | instanceId=${resultado.instanceId}`);
-  return resultado;
+function _navegarRuta(objeto, ruta) {
+    return ruta.split(".").reduce(
+        (acumulador, clave) => (acumulador != null ? acumulador[clave] : undefined),
+        objeto
+    );
 }
 
-// ─── ANALISTA TESORERÍA (100% CAP — inicia el flujo) ──────────────────────────
+// =============================================================================
+// FUNCIÓN INTERNA: _armarContextoBpa
+// Construye el objeto de contexto que CAP envía a BPA al completar la tarea.
+// BPA v1.1.5 incluye: perfil, comentario, taskInstanceId.
+// =============================================================================
 
 /**
- * Migrado de: AnalistaTesorería.js → botón ENVIAR_SUPER_CAJA
- * El Analista INICIA la instancia BPA. El enrutamiento (Caja vs Supervisor) se
- * codifica en los flags del contexto; los usuarios por rol ya viajan en la propuesta.
- *   viaPago W      → EN_CAJA     (esCaja=true, sufijo "C")
- *   viaPago I o Z  → VALIDACION  (sufijo "S")
+ * Arma el payload de contexto para completar la tarea en BPA.
+ * El campo perfil es el literal IpPerfil del iFlow ZhrfApoReg.
+ *
+ * @param {object} rolBpa     - rol resuelto por resolverRolBpa()
+ * @param {string} comentario - comentario libre del firmante
+ * @param {string} instanceID - ID de la tarea BPA
+ * @returns {{ perfil: string, comentario: string, taskInstanceId: string }}
  */
-async function enviarSupervisorOCaja({ propuesta, usuario, constantes }) {
-  const errAdelanto = await propuestaService.validarAdelanto(propuesta);
-  if (errAdelanto) throw new Error(errAdelanto);
-
-  if (propuesta.viaPago === "W") {
-    propuesta.estadoPP    = "EN_CAJA";
-    propuesta.esCaja      = true;
-    propuesta.tituloTarea = _buildTituloTarea(propuesta.tituloTarea, "C");
-    return _iniciarFlujo({ propuesta, usuario });
-  }
-
-  if (propuesta.viaPago === "I" || propuesta.viaPago === "Z") {
-    propuesta.estadoPP    = "VALIDACION";
-    propuesta.esCaja      = false;
-    propuesta.tituloTarea = _buildTituloTarea(propuesta.tituloTarea, "S");
-    return _iniciarFlujo({ propuesta, usuario });
-  }
-
-  throw new Error(`Vía de pago '${propuesta.viaPago}' no tiene enrutamiento definido`);
+function _armarContextoBpa(rolBpa, comentario, instanceID) {
+    return {
+        perfil        : rolBpa.perfilCPI,
+        comentario    : comentario,
+        // PENDIENTE: confirmar con el arquitecto si es ID de tarea o de proceso.
+        // Actualmente se usa el instanceID de la tarea BPA.
+        taskInstanceId: instanceID,
+    };
 }
+
+// =============================================================================
+// EXPORTACIÓN: registrar handlers sobre el servicio PagosService
+// Llamado desde pagos-service.js en el bloque handle_aprobaciones()
+// =============================================================================
 
 /**
- * Migrado de: AnalistaTesorería.js → botón COMPENSAR (acción CAP-only).
- * docCompensacion lo obtiene pagos-service desde CPI antes de invocar.
+ * Registra todos los handlers de acciones de aprobación en el servicio CAP.
+ * Separa la lógica de aprobación del handler principal de pagos-service.js.
+ *
+ * @param {import('@sap/cds').ApplicationService} srv - instancia del servicio CAP
  */
-async function compensar({ propuesta, usuario, taskId, docCompensacion }) {
-  const respuesta = docCompensacion["n0:ZfiWsConsultarPropagoResponse"];
-  if (!respuesta || respuesta.EpFlag !== "EXISTE") {
-    throw new Error("No existe documento de compensación para esta propuesta");
-  }
-  propuesta.nroDocCompensacion = respuesta.EpNrodoccomp;
-  propuesta.fechaCompensacion  = respuesta.EpFecdoccomp;
-  propuesta.estadoPP           = "COMPENSADO";
-  propuesta.estaTerminado      = true;
-  return _ejecutar({ propuesta, usuario, taskId, perfil: "analista", accionFuncional: "aprobar" });
+function registrarHandlers(srv) {
+
+    // =========================================================================
+    // ACCIONES APODERADO — Apoderado1 y Apoderado2 (mismo handler, rol por tarea)
+    // Contexto BPA: startEvent.body
+    // =========================================================================
+
+    /**
+     * El apoderado aprueba la propuesta de nómina.
+     * BPA ejecuta el ActionTask apoReg que registra la firma en CPI/Payroll.
+     */
+    srv.on("apoderadoAprobar", "TareasInbox", async (req) => {
+        const accion = await _prepararAccion(req, "aprobar");
+        if (!accion) return; // req.error ya fue invocado
+
+        const { instanceID, rolBpa, comentario } = accion;
+
+        await bpaClient.completarTarea(
+            instanceID,
+            "aprobar",
+            _armarContextoBpa(rolBpa, comentario, instanceID)
+        );
+
+        LOG.info(`apoderadoAprobar OK | instanceID=${instanceID}`);
+        return { exito: true, mensaje: "Propuesta aprobada correctamente" };
+    });
+
+    /**
+     * El apoderado observa la propuesta (devuelve con nota al analista).
+     * BPA ejecuta el ActionTask Obs que registra la observación en CPI/Payroll.
+     */
+    srv.on("apoderadoObservar", "TareasInbox", async (req) => {
+        const accion = await _prepararAccion(req, "observar");
+        if (!accion) return;
+
+        const { instanceID, rolBpa, comentario } = accion;
+
+        if (!comentario) {
+            return req.error(400, "El comentario es obligatorio al observar una propuesta");
+        }
+
+        await bpaClient.completarTarea(
+            instanceID,
+            "observar",
+            _armarContextoBpa(rolBpa, comentario, instanceID)
+        );
+
+        LOG.info(`apoderadoObservar OK | instanceID=${instanceID}`);
+        return { exito: true, mensaje: "Observación registrada correctamente" };
+    });
+
+    // =========================================================================
+    // ACCIONES LIBERADOR FINAL
+    // Contexto BPA: startEvent.propuesta (proceso raíz)
+    // =========================================================================
+
+    /**
+     * El liberador autoriza el desembolso de la nómina.
+     * BPA ejecuta el ActionTask apoReg con decisión "liberar".
+     */
+    srv.on("liberadorLiberar", "TareasInbox", async (req) => {
+        const accion = await _prepararAccion(req, "liberar");
+        if (!accion) return;
+
+        const { instanceID, rolBpa, comentario } = accion;
+
+        await bpaClient.completarTarea(
+            instanceID,
+            "liberar",
+            _armarContextoBpa(rolBpa, comentario, instanceID)
+        );
+
+        LOG.info(`liberadorLiberar OK | instanceID=${instanceID}`);
+        return { exito: true, mensaje: "Nómina liberada correctamente" };
+    });
+
+    /**
+     * El liberador rechaza la propuesta.
+     * BPA devuelve el flujo al estado previo (según gateway de BPA).
+     */
+    srv.on("liberadorRechazar", "TareasInbox", async (req) => {
+        const accion = await _prepararAccion(req, "rechazar");
+        if (!accion) return;
+
+        const { instanceID, rolBpa, comentario } = accion;
+
+        if (!comentario) {
+            return req.error(400, "El comentario es obligatorio al rechazar una propuesta");
+        }
+
+        await bpaClient.completarTarea(
+            instanceID,
+            "rechazar",
+            _armarContextoBpa(rolBpa, comentario, instanceID)
+        );
+
+        LOG.info(`liberadorRechazar OK | instanceID=${instanceID}`);
+        return { exito: true, mensaje: "Propuesta rechazada. Se notificará al analista." };
+    });
+
+    /**
+     * El liberador anula definitivamente la propuesta de nómina.
+     * Acción irreversible: BPA cierra el proceso completo.
+     */
+    srv.on("liberadorAnular", "TareasInbox", async (req) => {
+        const accion = await _prepararAccion(req, "anular");
+        if (!accion) return;
+
+        const { instanceID, rolBpa, comentario } = accion;
+
+        if (!comentario) {
+            return req.error(400, "El comentario es obligatorio al anular una propuesta");
+        }
+
+        await bpaClient.completarTarea(
+            instanceID,
+            "anular",
+            _armarContextoBpa(rolBpa, comentario, instanceID)
+        );
+
+        LOG.info(`liberadorAnular OK | instanceID=${instanceID}`);
+        return { exito: true, mensaje: "Propuesta anulada correctamente." };
+    });
+
+    // =========================================================================
+    // ACCIONES COORDINADOR — ANULADAS en BPA v1.1.0
+    // Conservadas para uso futuro. Retornan error controlado si son invocadas.
+    // La UI no las mostrará porque esCoordinador = false siempre.
+    // =========================================================================
+
+    /**
+     * [FUTURO] El coordinador valida y envía al flujo de apoderados.
+     * ANULADO en BPA v1.1.0 — no disponible en el flujo activo.
+     */
+    srv.on("coordinadorAprobar", "TareasInbox", async (req) => {
+        LOG.warn(`coordinadorAprobar invocado | instanceID=${req.params?.[0]?.instanceID} | ROL ANULADO`);
+        return req.error(501, "La etapa de Coordinador no está activa en el flujo actual (BPA v1.1.0)");
+    });
+
+    /**
+     * [FUTURO] El coordinador rechaza el lote de nómina.
+     * ANULADO en BPA v1.1.0 — no disponible en el flujo activo.
+     */
+    srv.on("coordinadorRechazar", "TareasInbox", async (req) => {
+        LOG.warn(`coordinadorRechazar invocado | instanceID=${req.params?.[0]?.instanceID} | ROL ANULADO`);
+        return req.error(501, "La etapa de Coordinador no está activa en el flujo actual (BPA v1.1.0)");
+    });
 }
 
-/** CERRAR_OBS — acción CAP-only */
-async function cerrarPorObservacion({ propuesta, usuario, taskId }) {
-  propuesta.estadoPP      = "CERRADO_OB";
-  propuesta.estaTerminado = true;
-  return _ejecutar({ propuesta, usuario, taskId, perfil: "analista", accionFuncional: "observar" });
-}
-
-/** ELIMINAR_DOC — acción CAP-only */
-async function eliminarDoc({ propuesta, usuario, taskId }) {
-  propuesta.estadoPP      = "ELIMINADO";
-  propuesta.estaTerminado = true;
-  return _ejecutar({ propuesta, usuario, taskId, perfil: "analista", accionFuncional: "observar" });
-}
-
-// ─── SUPERVISOR / COORDINADOR (user task: form_aprobacionDelCoordinador_2) ─────
-
-/**
- * Migrado de: Supervisor.js → botón APROBAR_PP
- * El Coordinador completa con decision "aprobar". El enrutamiento (Revisor/
- * Liberador vs Apoderado vs Analista) se refleja en los flags del contexto.
- */
-async function supervisorAprobar({ propuesta, usuario, taskId, constantes }) {
-  const sociedadesRevision = constantes?.sociedadesRevision ?? [];
-
-  const necesitaRevisor = !propuesta.numeroPropuesta?.includes("CAR")
-                        && propuesta.viaPago !== "C"
-                        && sociedadesRevision.includes(propuesta.sociedad);
-
-  // Re-aprobación desde estado observado
-  if (propuesta.estadoPP === "OBS_APODER" || propuesta.estadoPP === "OBS_REVISO") {
-    return necesitaRevisor
-      ? _enviarRevisor({ propuesta, usuario, taskId })
-      : _enviarApoderado({ propuesta, usuario, taskId });
-  }
-
-  if (propuesta.modalidadPP?.includes("H2H")) {
-    return necesitaRevisor
-      ? _enviarRevisor({ propuesta, usuario, taskId })
-      : _enviarApoderado({ propuesta, usuario, taskId });
-  }
-
-  if (propuesta.modalidadPP === "CAR") {
-    // TODO(arquitecto): el flujo CAR consultaba perfil de tesorero en SAP.
-    // Pendiente de definir cómo se resuelve en BTP (¿XSUAA o flag de contexto?).
-    return necesitaRevisor
-      ? _enviarRevisor({ propuesta, usuario, taskId })
-      : _enviarApoderado({ propuesta, usuario, taskId });
-  }
-
-  if (propuesta.viaPago === "Z" || propuesta.viaPago === "I") {
-    propuesta.estadoPP    = "APROBADO";
-    propuesta.tieneRevisor = false;
-    propuesta.tieneAnalista = true;
-    propuesta.tituloTarea  = _buildTituloTarea(propuesta.tituloTarea, "AT");
-    return _ejecutar({ propuesta, usuario, taskId, perfil: "coordinador", accionFuncional: "aprobar" });
-  }
-
-  throw new Error("No se pudo determinar el flujo de aprobación");
-}
-
-/** TERMINAR_FLUJO (Supervisor) — cancela la instancia completa (sin decision) */
-async function supervisorTerminarFlujo({ propuesta, usuario, taskId, constantes }) {
-  const viasPagoValidar = constantes?.validarViaPago ?? [];
-  if (viasPagoValidar.includes(propuesta.viaPago)) {
-    throw new Error("Esta acción no es válida para la vía de pago C, I, W o Z");
-  }
-  return bpa.cerrarFlujo(taskId);
-}
-
-/** OBSERVAR (Supervisor) → ZfiWsH2hObs vía CPI + decision "observar" del Coordinador */
-async function supervisorObservar({ propuesta, usuario, taskId, comentario }) {
-  // TODO(arquitecto): usuarioSAP del payload CPI = usuario.name autenticado.
-  const payloadObservacion = cpi.buildObsPayload(propuesta, usuario.name, comentario, "OBTR");
-  await cpi.registrarObservacionSAP(payloadObservacion); // si falla, lanza excepción
-
-  propuesta.estadoPP    = "OBS_SUPER";
-  propuesta.estaAnulado = true;
-  return _ejecutar({ propuesta, usuario, taskId, perfil: "coordinador", accionFuncional: "observar" });
-}
-
-// ─── REVISOR / LIBERADOR (user task: form_aprobacionFinalForm_2) ───────────────
-// TODO(arquitecto): confirmar si LI (liberador) == RV (revisor). El Liberador usa
-//                   IDs de decision en inglés (approve/reject/cancel).
-
-/**
- * Migrado de: Revisor.js → botón APROBAR_PP
- * Envía al Apoderado. La confirmación se materializa en la decision BPA "aprobar".
- */
-async function revisorAprobar({ propuesta, usuario, taskId, comentario }) {
-  propuesta.estadoPP     = "EN_FIRMA";
-  propuesta.estaAprobado = true;
-  propuesta.tituloTarea  = _buildTituloTarea(propuesta.tituloTarea, "A");
-  return _ejecutar({ propuesta, usuario, taskId, perfil: "liberador", accionFuncional: "aprobar" });
-}
-
-/** OBSERVAR (Revisor) → ZfiWsH2hObs. El Liberador no tiene "observar": se mapea a "rechazar". */
-async function revisorObservar({ propuesta, usuario, taskId, comentario }) {
-  const payloadObservacion = cpi.buildObsPayload(propuesta, usuario.name, comentario, "OBRA");
-  await cpi.registrarObservacionSAP(payloadObservacion);
-
-  propuesta.estadoPP = "OBS_REVISOR";
-  // TODO(arquitecto): confirmar que "observar" del Revisor mapea a decision "reject" del Liberador.
-  return _ejecutar({ propuesta, usuario, taskId, perfil: "liberador", accionFuncional: "rechazar" });
-}
-
-// ─── APODERADO (user task: form_aprobacionDelApoderado_1 / _2) ─────────────────
-
-/**
- * Migrado de: Apoderado.js → botón APROBAR_PP (firma)
- *   1. Determina F1 (contadorFirma=0) vs F2 (≥1) desde el contexto
- *   2. buildApoRegPayload → PiEstado F1|F2
- *   3. Registra firma en SAP vía CPI /apoReg (ANTES de completar BPA)
- *   4. Si F2 → estadoPP=FIRMADO, sufijo "S"; si F1 → sigue EN_FIRMA, sufijo "A"
- *   5. Completa tarea BPA con decision "aprobar"
- */
-async function apoderadoFirmar({ propuesta, usuario, taskId, constantes }) {
-  const sociedadesTermina = constantes?.sociedadesTermina ?? [];
-
-  // 1. Contador de firmas: viaja en el contexto (no se consulta a SAP)
-  const contadorFirma = propuesta.contadorFirma ?? 0;
-
-  // 2-3. Registrar firma en SAP vía CPI ANTES de completar BPA
-  //      TODO(arquitecto): usuarioSAP = usuario.name; confirmar mapeo si aplica.
-  //      NOTA(.mtar): el subproceso de apoderados invoca CPI directamente para apoReg.
-  //      TODO(arquitecto): confirmar que CAP no duplique este registro con el BPA.
-  const payloadApoReg = cpi.buildApoRegPayload(propuesta, usuario.name, contadorFirma);
-  const respuestaApoReg = await cpi.registrarAprobacionSAP(payloadApoReg);
-  if (respuestaApoReg?.["n0:ZfiWsH2hApoRegResponse"]?.EpMensaje &&
-      !respuestaApoReg["n0:ZfiWsH2hApoRegResponse"].EpMensaje.includes("OK")) {
-    throw new Error(respuestaApoReg["n0:ZfiWsH2hApoRegResponse"].EpMensaje);
-  }
-
-  // 4. Determinar nuevo estado
-  const esFirmado = contadorFirma >= 1;
-  propuesta.estadoPP      = esFirmado ? "FIRMADO" : "EN_FIRMA";
-  propuesta.contadorFirma = contadorFirma + 1;
-  propuesta.estaAprobado  = true;
-  propuesta.estaConforme  = esFirmado && sociedadesTermina.includes(propuesta.sociedad);
-  propuesta.tituloTarea   = _buildTituloTarea(propuesta.tituloTarea, esFirmado ? "S" : "A");
-
-  return _ejecutar({ propuesta, usuario, taskId, perfil: "apoderado", accionFuncional: "aprobar" });
-}
-
-/** OBSERVAR (Apoderado) → ZfiWsH2hObs + decision "observar" */
-async function apoderadoObservar({ propuesta, usuario, taskId, comentario }) {
-  const payloadObservacion = cpi.buildObsPayload(propuesta, usuario.name, comentario, "OBAP");
-  await cpi.registrarObservacionSAP(payloadObservacion);
-
-  propuesta.estadoPP = "OBS_APODER";
-  return _ejecutar({ propuesta, usuario, taskId, perfil: "apoderado", accionFuncional: "observar" });
-}
-
-// ─── CAJA (100% CAP — sin user task BPA) ──────────────────────────────────────
-
-/** CONFIRMAR_PAGO (Caja) — acción CAP-only */
-async function cajaConfirmarPago({ propuesta, usuario, taskId }) {
-  propuesta.estadoPP      = "PAGADO";
-  propuesta.estaTerminado = true;
-  return _ejecutar({ propuesta, usuario, taskId, perfil: "caja", accionFuncional: "aprobar" });
-}
-
-/** OBSERVAR (Caja) → ZfiWsH2hObs — acción CAP-only (registro CPI + estado) */
-async function cajaObservar({ propuesta, usuario, taskId, comentario }) {
-  const payloadObservacion = cpi.buildObsPayload(propuesta, usuario.name, comentario, "OBCA");
-  await cpi.registrarObservacionSAP(payloadObservacion);
-
-  propuesta.estadoPP = "OBS_CAJA";
-  return _ejecutar({ propuesta, usuario, taskId, perfil: "caja", accionFuncional: "observar" });
-}
-
-// ─── HELPERS COMPARTIDOS (rutas del Coordinador) ──────────────────────────────
-
-/** Enruta al Revisor/Liberador. El Coordinador completa con decision "aprobar". */
-async function _enviarRevisor({ propuesta, usuario, taskId }) {
-  propuesta.estadoPP    = "REVISION";
-  propuesta.tieneRevisor = true;
-  propuesta.tituloTarea = _buildTituloTarea(propuesta.tituloTarea, "R");
-  return _ejecutar({ propuesta, usuario, taskId, perfil: "coordinador", accionFuncional: "aprobar" });
-}
-
-/** Enruta al Apoderado. El Coordinador completa con decision "aprobar". */
-async function _enviarApoderado({ propuesta, usuario, taskId }) {
-  propuesta.estadoPP     = "EN_FIRMA";
-  propuesta.tieneRevisor = false;
-  propuesta.estaAprobado = true;
-  propuesta.tituloTarea  = _buildTituloTarea(propuesta.tituloTarea, "A");
-  return _ejecutar({ propuesta, usuario, taskId, perfil: "coordinador", accionFuncional: "aprobar" });
-}
-
-module.exports = {
-  // Analista Tesorería
-  enviarSupervisorOCaja,
-  compensar,
-  cerrarPorObservacion,
-  eliminarDoc,
-  // Supervisor / Coordinador
-  supervisorAprobar,
-  supervisorTerminarFlujo,
-  supervisorObservar,
-  // Revisor / Liberador
-  revisorAprobar,
-  revisorObservar,
-  // Apoderado
-  apoderadoFirmar,
-  apoderadoObservar,
-  // Caja
-  cajaConfirmarPago,
-  cajaObservar,
-};
+module.exports = { registrarHandlers };

@@ -1,324 +1,224 @@
-// ─────────────────────────────────────────────────────────────────
+// =============================================================================
 // srv/pagos-service.cds
 //
-// Servicio principal de aprobaciones H2H Nómina.
-// Path: /nomina/aprobaciones
+// DEFINICIÓN de dominio: entidades, tipos y acciones del servicio H2H Nómina.
+// NO contiene anotaciones @UI (viven en app/ui5-aprobaciones/annotations.cds).
+// NO contiene lógica de negocio (vive en pagos-service.js / aprobacion.service.js).
 //
-// Sin persistencia propia (sin HANA Cloud).
-// Fuentes de datos en runtime:
-//   BPA  → TareasInbox, contexto del flujo (PropuestaNomina.json)
-//   CPI  → Proveedores, validaciones, firmas, correo
-//   HANA → Adjuntos, Aprobadores (via CPI como fachada)
+// Estado BPA v1.1.5:
+//   Roles activos en flujo: Apoderado1, Apoderado2, Liberador.
+//   Coordinador: anulado en v1.1.0 — acciones conservadas para uso futuro.
 //
-// DECISIÓN DE DISEÑO — Object Page sobre TareasInbox:
-//   La Object Page se monta directamente sobre TareasInbox.
-//   Las composiciones viven en TareasInbox y se cargan solo
-//   en el READ por instanceID (clave específica).
-//   Evita el problema de resolución de asociaciones entre
-//   entidades virtuales (@cds.persistence.skip).
-//
-// CONVENCIÓN DE NOMBRES (Opción A):
-//   Nombres exactos del objeto PropuestaNomina.json del BPA.
-// ─────────────────────────────────────────────────────────────────
+// NOTA CDS 9.x: las acciones bound se declaran con
+//   extend entity X with actions { ... }
+//   fuera del cuerpo de la entidad pero dentro del service.
+// =============================================================================
 
-// ── Tipo de entrada para acciones por rol ─────────────────────────
-// Objeto PropuestaNomina que circula en el flujo BPA.
+// =============================================================================
+// Tipo: PropuestaNomina (fuente de verdad = DataType BPA aprobacionDeNomina)
+// 35 campos — versión 1.1.5
+// =============================================================================
 type PropuestaNomina {
-  numeroPropuesta       : String(20);
-  sociedad              : String(4);
-  fechaPropuestaPago    : String(10);
-  banco                 : String(10);
-  bancoDescripcion      : String(100);
-  viaPago               : String(1);
-  modalidadPP           : String(10);
-  version               : String(4);
-  importe               : String(20);
-  moneda                : String(5);
-  estadoPP              : String(20);
-  analista              : String(12);
-  correoAnalista        : String(100);
-  usuarioCreacion       : String(100);
-  usuarioCreacionPP     : String(12);
-  tituloTarea           : String(100);
-  existeDocumento       : String(10);
-  indicadorPagoAdelanto : String(1);
-  idInstanciaWF         : String(50);
-  nroDocCompensacion    : String(20);
-  fechaCompensacion     : String(10);
-  tieneAnalista         : Boolean;
-  estaConforme          : Boolean;
-  tieneRevisor          : Boolean;
-  estaAprobado          : Boolean;
-  esCaja                : Boolean;
-  estaTerminado         : Boolean;
-  estaAnulado           : Boolean;
-  usuariosRevisores     : array of String;
-  usuariosSupervisores  : array of String;
-  usuariosAnalistas     : array of String;
-  usuarioApoderado      : String(100);
-  usuarioCaja           : String(100);
-  contadorFirma         : Integer;
-}
+    // Identificación del lote
+    sociedad               : String;
+    numeroPropuesta        : String;
+    version                : String;
+    modalidadPP            : String;
+    tipoNomina             : String;    // PPP en el tituloTarea
+    tipoTrabajador         : String;    // E = Empleado, P = Pensionista
+    subdivision            : String;    // Aplica solo en AESA
 
-// ── Tipo constantes de negocio ────────────────────────────────────
-type ConstantesRpta {
-  sociedadesRevision : array of String;
-  validarViaPago     : array of String;
-  aprobarViaPago     : array of String;
-  sociedadesTermina  : array of String;
-  tesoreros          : LargeString;
-  documentUrl        : String;
-  documentUrlTasa    : String;
-}
+    // Datos de pago
+    banco                  : String;
+    bancoDescripcion       : String;
+    moneda                 : String;
+    importe                : String;
+    viaPago                : String;
+    indicadorPagoAdelanto  : String;
 
-// ── Tipo resultado de acción ──────────────────────────────────────
+    // Fechas y título
+    fechaPropuestaPago     : String;    // formato yyyy-MM-dd
+    tituloTarea            : String;    // "SSSS – DD/MM/AAAA - PPP - BBBB – X - MMM[ - DDDD]"
+
+    // Control documental
+    existeDocumento        : Boolean;
+    contadorFirma          : Integer;
+
+    // Usuarios — strings individuales, sin arrays
+    analista               : String;    // email consolidado del analista
+    usuarioCreacion        : String;
+    usuarioCreacionPP      : String;
+    correoAnalista         : String;
+    usuarioCoordinador     : String;    // reservado para uso futuro
+    usuarioApoderado1      : String;
+    usuarioApoderado2      : String;
+    usuarioLiberador       : String;
+    usuarioCaja            : String;
+
+    // Flags de estado (legado — no usados para visibilidad en UI v1.1.0+)
+    tieneAnalista          : Boolean;
+    estaConforme           : Boolean;
+    estaAprobado           : Boolean;
+    esCaja                 : Boolean;
+    estaTerminado          : Boolean;
+    estaAnulado            : Boolean;
+
+    // Campos BPA v1.1.5 escritos por BPA en el contexto de la tarea
+    perfil                 : String;    // "AP" | "LI" | "CO" — literal IpPerfil de CPI
+    comentario             : String;    // comentario libre del firmante
+    taskInstanceId         : String;    // ID usado por CPI para mapear el proceso
+};
+
+// =============================================================================
+// Tipo: resultado estándar de las acciones de aprobación
+// =============================================================================
 type AccionResult {
-  success  : Boolean;
-  mensaje  : String;
-  estadoPP : String;
-  taskId   : String;
-}
+    exito   : Boolean;
+    mensaje : String;
+};
 
-// ── Servicio principal ────────────────────────────────────────────
+// =============================================================================
+// Servicio principal
+// =============================================================================
+service PagosService @(path: '/nomina/aprobaciones') {
 
-@path: '/nomina/aprobaciones'
-service PagosService {
+    // =========================================================================
+    // Entidad principal: TareasInbox
+    // Lista y detalle de tareas pendientes del usuario autenticado.
+    // Clave: instanceID = campo "id" de la API de tasks de BPA Workflow.
+    // =========================================================================
+    @cds.persistence.skip
+    entity TareasInbox {
+        // Clave única de la tarea BPA
+        key instanceID          : String(255);
 
-  // ── Entidades de composición de TareasInbox ─────────────────────
+        // Campos del List Report
+        tituloTarea             : String(255);
+        banco                   : String(50);
+        importe                 : String(30);
+        moneda                  : String(5);
+        sociedad                : String(10);
+        numeroPropuesta         : String(20);
+        fechaPropuestaPago      : String(10);
+        estadoTarea             : String(20);       // READY | RESERVED
+        workflowInstanceId      : String(255);      // ID del proceso padre
 
-  // Proveedores beneficiarios — Origen: fragment/Proveedores.xml
-  @cds.persistence.skip
-  entity Proveedor {
-    key proveedorId : String(10);
-        ruc         : String(11);
-        nombre      : String(80);
-        glosa       : String(100);
-        monto       : Decimal(13,2);
-        facturas    : String(200);
-  }
+        // Campos del Object Page — escalares de la propuesta
+        estadoPP                : String(50);
+        urlPDF                  : String(500);
+        modalidadPP             : String(20);
+        viaPago                 : String(5);
+        tipoNomina              : String(10);
+        tipoTrabajador          : String(5);
+        subdivision             : String(20);
+        version                 : String(5);
+        indicadorPagoAdelanto   : String(5);
+        existeDocumento         : Boolean;
+        contadorFirma           : Integer;
+        analista                : String(100);
+        usuarioCreacion         : String(100);
+        correoAnalista          : String(100);
+        usuarioApoderado1       : String(100);
+        usuarioApoderado2       : String(100);
+        usuarioLiberador        : String(100);
+        usuarioCoordinador      : String(100);      // reservado para uso futuro
+        usuarioCaja             : String(100);
+        estaAnulado             : Boolean;
+        estaTerminado           : Boolean;
 
-  // Documentos adjuntos — Origen: fragment/Adjuntos2.xml
-  @cds.persistence.skip
-  entity Adjunto {
-    key adjuntoId          : String(36);
-        nombre             : String(100);
-        tipoAdjunto        : String(20);
-        activo             : Boolean;
-        docServiceObjectID : String(36);
-  }
+        // Flags de visibilidad por rol — calculados por perfiles.calcularFlagsRol()
+        // XSUAA + taskDefinitionId son la única fuente de verdad del rol.
+        esApoderado1            : Boolean;          // taskDefinitionId = form_aprobacionDelApoderado_1
+        esApoderado2            : Boolean;          // taskDefinitionId = form_aprobacionDelApoderado_2
+        esApoderado             : Boolean;          // esApoderado1 || esApoderado2
+        esLiberador             : Boolean;          // taskDefinitionId = form_aprobacionLiberadorFinal_1
+        esCoordinador           : Boolean;          // siempre false en flujo activo v1.1.0
 
-  // Historial de aprobaciones — Origen: fragment/Aprobadores.xml
-  @cds.persistence.skip
-  entity Aprobador {
-    key aprobadorId : String(10);
-        usuario     : String(50);
-        rol         : String(30);
-        fechaAprob  : DateTime;
-        aprobado    : Boolean;
-        observacion : String(255);
-  }
+        // Composiciones — cargadas solo al abrir el Object Page
+        proveedores             : Composition of many Proveedor
+                                    on proveedores.instanceID = instanceID;
+        adjuntos                : Composition of many Adjunto
+                                    on adjuntos.instanceID = instanceID;
+        aprobadores             : Composition of many Aprobador
+                                    on aprobadores.instanceID = instanceID;
+    };
 
-  // ── Entidad Media para descarga del PDF de la propuesta ─────────────────────
-  // Patrón estándar CAP: @Core.MediaType en campo LargeBinary.
-  // CAP sirve GET /PropuestaPDF(id)/contenido con Content-Disposition: attachment.
-  // Fuente oficial: cap.cloud.sap/docs/guides/services/media-data
-  // Origen legado: Detail.controller.js → getPropuestaPDFSAP() → Docum base64
-  @cds.persistence.skip
-  entity PropuestaPDF {
-    key id                 : String(50);
-        numeroPropuesta    : String(20);
-        sociedad           : String(4);
-        fechaPropuestaPago : String(10);
-        mimeType           : String @Core.IsMediaType;
-        nombreArchivo      : String;
-        contenido          : LargeBinary @Core.MediaType: mimeType
-                                        @Core.ContentDisposition.Filename: nombreArchivo
-                                        @Core.ContentDisposition.Type: 'attachment';
-  }
+    // =========================================================================
+    // Acciones bound de TareasInbox
+    // Sintaxis CDS 9.x: extend entity X with actions { ... }
+    // =========================================================================
+    extend entity TareasInbox with actions {
 
-  // ── BANDEJA DE TAREAS + DETALLE ─────────────────────────────────
-  // Sirve al List Report (READ sin clave) y a la Object Page (READ con clave).
-  // Origen legado:
-  //   List Report : Master.view.xml
-  //   Object Page : Detail.view.xml (IconTabBar 4 pestañas)
-  @readonly
-  @cds.persistence.skip
-  entity TareasInbox {
+        // Apoderado (AP1 y AP2) — contexto BPA: startEvent.body
+        // Visibilidad: esApoderado = true | Decisiones: aprobar | observar
 
-    // Clave técnica BPA
-    key instanceID           : String(50);
+        // El apoderado confirma la propuesta de nómina
+        action apoderadoAprobar(comentario: String)  returns AccionResult;
 
-    // Metadatos de auditoría BPA
-    SAP__Origin              : String(100);
-    creadoPor                : String(100);
-    creadoEn                 : DateTime;
+        // El apoderado devuelve la propuesta al analista con una observación
+        action apoderadoObservar(comentario: String) returns AccionResult;
 
-    // Campos del List Report (del PropuestaNomina.json)
-    tituloTarea              : String(100);
-    numeroPropuesta          : String(20);
-    sociedad                 : String(4);
-    fechaPropuestaPago       : String(10);
-    banco                    : String(10);
-    bancoDescripcion         : String(100);
-    viaPago                  : String(1);
-    modalidadPP              : String(10);
-    version                  : String(4);
-    importe                  : String(20);
-    moneda                   : String(5);
-    analista                 : String(12);
-    correoAnalista           : String(100);
+        // Liberador Final (LI) — contexto BPA: startEvent.propuesta
+        // Visibilidad: esLiberador = true | Decisiones: liberar | rechazar | anular
 
-    // URL del PDF para descarga desde la Object Page (Tarea 2.3)
-    //     // Calculada en el handler READ por instanceID: /PropuestaPDF('id')/contenido
-    urlPDF               : String;
+        // El liberador autoriza el desembolso de la nómina
+        action liberadorLiberar(comentario: String)  returns AccionResult;
 
-    // Campos adicionales del Facet 1 — Información (Object Page)
-    estadoPP                 : String(20);
-    usuarioCreacion          : String(100);
-    usuarioCreacionPP        : String(12);
-    existeDocumento          : String(10);
-    indicadorPagoAdelanto    : String(1);
+        // El liberador rechaza la propuesta (regresa al flujo de apoderados)
+        action liberadorRechazar(comentario: String) returns AccionResult;
 
-    // Flags de visibilidad por rol — calculados desde el taskDefinitionId (activityId)
-    // de la tarea BPA vía perfiles.calcularFlagsRol(). Reemplazan a los flags
-    // legado del contexto (tieneAnalista/estaConforme/tieneRevisor/estaAprobado/esCaja).
-    // esAnalista y esCaja son siempre false: esos roles no tienen user task en BPA.
-    esAnalista               : Boolean;
-    esCoordinador            : Boolean;
-    esApoderado              : Boolean;
-    esLiberador              : Boolean;
-    esCaja                   : Boolean;
+        // El liberador anula definitivamente la propuesta de nómina
+        action liberadorAnular(comentario: String)   returns AccionResult;
 
-    // Flags de estado de la propuesta — sí provienen del contexto BPA
-    estaTerminado            : Boolean;
-    estaAnulado              : Boolean;
+        // Coordinador (CO) — ANULADO en BPA v1.1.0, reservado para uso futuro
+        // Visibilidad: siempre false (esCoordinador = false en el handler)
+        // No mostrar en la UI mientras el flujo activo no incluya CO.
 
-    // Campos calculados por el handler — visibilidad doble del Coordinador
-    puedeTerminarFlujo : Boolean; // true cuando esCoordinador AND estaTerminado
-    puedeAnular        : Boolean; // true cuando esCoordinador AND estaAnulado
+        // [FUTURO] El coordinador valida y envía al flujo de apoderados
+        action coordinadorAprobar(comentario: String)  returns AccionResult;
 
-    // Composiciones — Facets 2, 3, 4 de la Object Page
-    // Cargadas solo en READ por instanceID (no en el listado)
-    proveedores              : Composition of many Proveedor;
-    adjuntos                 : Composition of many Adjunto;
-    aprobadores              : Composition of many Aprobador;
+        // [FUTURO] El coordinador rechaza el lote de nómina
+        action coordinadorRechazar(comentario: String) returns AccionResult;
+    };
 
+    // =========================================================================
+    // Composición: Proveedor — beneficiarios del lote de pago
+    // =========================================================================
+    @cds.persistence.skip
+    entity Proveedor {
+        key instanceID      : String(255);
+        key posicion        : Integer;
+        nombreProveedor     : String(200);
+        cuentaBancaria      : String(50);
+        banco               : String(50);
+        moneda              : String(5);
+        importe             : String(30);
+        viaPago             : String(5);
+    };
 
-  }
-  // ── BOUND ACTIONS DE TareasInbox ────────────────────────────────
-  //
-  // Migración a bound actions (bloque Migración Bound Actions):
-  //   - En Fiori Elements V4 el contexto de la Object Page solo se pasa a
-  //     las acciones BOUND; por eso la visibilidad dinámica (UI.Hidden con
-  //     path sobre los flags de rol) requiere que las acciones sean bound.
-  //   - El cliente ya NO envía propuesta/usuario/taskId: el handler los
-  //     deriva del instanceID de la instancia (clave bound), del contexto
-  //     BPA (fuente autoritativa) y de XSUAA (req.user). Esto además evita
-  //     manipulación de datos desde el cliente.
-  //   - Los parámetros restantes (comentario) generan el dialog automático
-  //     de Fiori Elements (Tarea 3.6).
-  actions {
+    // =========================================================================
+    // Composición: Adjunto — documentos vinculados a la propuesta
+    // =========================================================================
+    @cds.persistence.skip
+    entity Adjunto {
+        key instanceID      : String(255);
+        key nombre          : String(255);
+        url                 : String(500);
+        tipoDocumento       : String(50);
+        fechaCarga          : String(20);
+    };
 
-    // ── Analista Tesorería (esAnalista) ──────────────────────────
-    // Tarea 3.1 — Enviar al Supervisor o Caja según viaPago (W → EN_CAJA)
-    @Common.Label: 'Enviar Super/Caja'
-    action enviarSupervisorOCaja() returns ResultadoAccion;
-
-    // Tarea 3.1 — Compensar la propuesta con documento SAP
-    @Common.Label: 'Compensar'
-    action compensar() returns ResultadoAccion;
-
-    // Tarea 3.1 — Cerrar la propuesta por observación del supervisor
-    @Common.Label: 'Cerrar por obs.'
-    action cerrarPorObservacion(
-      @Common.Label: 'Comentario'
-      comentario : String @mandatory  // dialog automático de Fiori Elements
-    ) returns ResultadoAccion;
-
-    // Tarea 3.1 — Eliminar el documento generado
-    @Common.Label: 'Eliminar Doc.'
-    action eliminarDoc() returns ResultadoAccion;
-
-    // ── Coordinador (esCoordinador) ──────────────────────────────
-    // Tarea 3.2 — Aprobar la propuesta y enrutar al siguiente paso
-    @Common.Label: 'Aprobar PP'
-    action supervisorAprobar() returns ResultadoAccion;
-
-    // Tarea 3.2 — Terminar el flujo completo (visibilidad: puedeTerminarFlujo)
-    @Common.Label: 'Terminar flujo'
-    action supervisorTerminarFlujo() returns ResultadoAccion;
-
-    // Tarea 3.2 — Observar la propuesta (devuelve al Analista)
-    @Common.Label: 'Observar'
-    action supervisorObservar(
-      @Common.Label: 'Comentario'
-      comentario : String @mandatory
-    ) returns ResultadoAccion;
-
-    // Tarea 3.2 — Anular la propuesta (visibilidad: puedeAnular)
-    @Common.Label: 'Anular'
-    action supervisorAnular(
-      @Common.Label: 'Comentario'
-      comentario : String @mandatory
-    ) returns ResultadoAccion;
-
-    // ── Revisor/Liberador (esLiberador) ──────────────────────────
-    // Tarea 3.3 — Aprobar en etapa de revisión (REVISION → EN_FIRMA)
-    @Common.Label: 'Aprobar PP'
-    action revisorAprobar() returns ResultadoAccion;
-
-    // Tarea 3.3 — Observar en etapa de revisión
-    @Common.Label: 'Observar'
-    action revisorObservar(
-      @Common.Label: 'Comentario'
-      comentario : String @mandatory
-    ) returns ResultadoAccion;
-
-    // ── Apoderado (esApoderado) ──────────────────────────────────
-    // Tarea 3.4 — Firmar (F1/F2 según contadorFirma del contexto)
-    @Common.Label: 'Firmar'
-    action apoderadoFirmar() returns ResultadoAccion;
-
-    // Tarea 3.4 — Observar en etapa de firma
-    @Common.Label: 'Observar'
-    action apoderadoObservar(
-      @Common.Label: 'Comentario'
-      comentario : String @mandatory
-    ) returns ResultadoAccion;
-
-    // Tarea 3.4 — Redirigir a otro apoderado
-    // TODO(arquitecto): redirigirApoderado pendiente en el dominio
-    @Common.Label: 'Redirigir Apoderado'
-    action redirigirApoderado(
-      @Common.Label: 'Apoderado destino (email)'
-      comentario : String @mandatory  // email del nuevo apoderado
-    ) returns ResultadoAccion;
-
-    // ── Caja (esCaja) ────────────────────────────────────────────
-    // Tarea 3.5 — Confirmar el pago en caja (EN_CAJA → PAGADO)
-    @Common.Label: 'Confirmar Pago'
-    action cajaConfirmarPago() returns ResultadoAccion;
-
-    // Tarea 3.5 — Observar en etapa de caja
-    @Common.Label: 'Observar'
-    action cajaObservar(
-      @Common.Label: 'Comentario'
-      comentario : String @mandatory
-    ) returns ResultadoAccion;
-  }
-
-  // ── FUNCIONES Y ACCIONES ───────────────────────────────────────
-
-  @Common.Label: 'Obtener constantes de negocio'
-  function obtenerConstantes() returns ConstantesRpta;
-
-  // ── Resultado estándar devuelto por todas las acciones ────────────────────────
-  // Reemplaza AccionResult del legado (Detail.controller.js → _procesarRespuesta)
-  type ResultadoAccion {
-    exitoso  : Boolean; // true si la acción completó sin errores
-    mensaje  : String;  // mensaje descriptivo para mostrar al usuario
-    estadoPP : String;  // nuevo estado de la propuesta tras la acción
-    taskId   : String;  // ID de la tarea BPA procesada
-  }
-
+    // =========================================================================
+    // Composición: Aprobador — historial de firmas de la propuesta
+    // =========================================================================
+    @cds.persistence.skip
+    entity Aprobador {
+        key instanceID      : String(255);
+        key orden           : Integer;
+        usuario             : String(100);
+        rol                 : String(30);
+        decision            : String(30);
+        comentario          : String(500);
+        fechaAccion         : String(30);
+    };
 }
