@@ -191,7 +191,8 @@
   "sap.fe": {
     "app": {
       "share": {
-        "showSendEmail": false
+        "showSendEmail": false,
+        "showSaveAsTile": false
       }
     }
   }

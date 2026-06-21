@@ -12,7 +12,7 @@ using PagosService from '../../srv/pagos-service';
 annotate PagosService.TareasInbox with @(
 
     Capabilities.DeleteRestrictions: { Deletable: false },
-    Capabilities.UpdateRestrictions: { Updatable: false },
+    // Capabilities.UpdateRestrictions: { Updatable: false },
     Capabilities.InsertRestrictions: { Insertable: false },
 
     UI.HeaderInfo: {
@@ -47,45 +47,20 @@ annotate PagosService.TareasInbox with @(
     ],
 
     // ── Botones del Object Page ───────────────────────────────────────────────
+    // Botones de acción del Object Page.
+    // ![@UI.Hidden] con expresiones dinámicas (//) fue eliminado:
+    // causaba que Fiori Elements dejara el botón en estado interno bloqueado
+    // impidiendo el dispatch aunque el botón fuera visible.
+    // La autorización por rol se mantiene en el backend (_prepararAccion valida
+    // taskDefinitionId desde BPA — anti-tampering garantizado).
+    // TODO: reimplementar visibilidad por rol vía sap.fe Side Effects o
+    // UI.Hidden estático una vez validado el flujo completo en QAS.
     UI.Identification: [
-        // Apoderado
-        {
-            $Type       : 'UI.DataFieldForAction',
-            Action      : 'PagosService.TareasInbox_apoderadoAprobar',
-            Label       : 'Aprobar',
-            Criticality : #Positive,
-            ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esApoderado' }] } },
-        },
-        {
-            $Type       : 'UI.DataFieldForAction',
-            Action      : 'PagosService.TareasInbox_apoderadoObservar',
-            Label       : 'Observar',
-            Criticality : #Critical,
-            ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esApoderado' }] } },
-        },
-        // Liberador
-        {
-            $Type       : 'UI.DataFieldForAction',
-            Action      : 'PagosService.TareasInbox_liberadorLiberar',
-            Label       : 'Liberar',
-            Criticality : #Positive,
-            ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esLiberador' }] } },
-        },
-        {
-            $Type       : 'UI.DataFieldForAction',
-            Action      : 'PagosService.TareasInbox_liberadorRechazar',
-            Label       : 'Rechazar',
-            Criticality : #Negative,
-            ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esLiberador' }] } },
-        },
-        {
-            $Type       : 'UI.DataFieldForAction',
-            Action      : 'PagosService.TareasInbox_liberadorAnular',
-            Label       : 'Anular',
-            Criticality : #Negative,
-            ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esLiberador' }] } },
-        },
-        // Coordinador — SIEMPRE OCULTO (anulado en BPA v1.1.0, reservado para uso futuro)
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.TareasInbox_apoderadoAprobar',  Label: 'Aprobar',      Criticality: #Positive  },
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.TareasInbox_apoderadoObservar', Label: 'Observar',     Criticality: #Critical  },
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.TareasInbox_liberadorLiberar',  Label: 'Liberar',      Criticality: #Positive  },
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.TareasInbox_liberadorRechazar', Label: 'Rechazar',     Criticality: #Negative  },
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.TareasInbox_liberadorAnular',   Label: 'Anular',       Criticality: #Negative  },
         { $Type: 'UI.DataFieldForAction', Action: 'PagosService.TareasInbox_coordinadorAprobar',  Label: 'Aprobar (CO)',  ![@UI.Hidden]: true },
         { $Type: 'UI.DataFieldForAction', Action: 'PagosService.TareasInbox_coordinadorRechazar', Label: 'Rechazar (CO)', ![@UI.Hidden]: true },
     ],
@@ -134,12 +109,21 @@ annotate PagosService.TareasInbox with @(
 // =============================================================================
 // Disponibilidad de acciones bound (controla si el botón está habilitado)
 // =============================================================================
+// annotate PagosService.TareasInbox actions {
+//     apoderadoAprobar  @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esApoderado' } }, Common.Label: 'Aprobar'      );
+//     apoderadoObservar @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esApoderado' } }, Common.Label: 'Observar'     );
+//     liberadorLiberar  @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esLiberador' } }, Common.Label: 'Liberar'      );
+//     liberadorRechazar @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esLiberador' } }, Common.Label: 'Rechazar'     );
+//     liberadorAnular   @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esLiberador' } }, Common.Label: 'Anular'       );
+//     coordinadorAprobar  @( Core.OperationAvailable: false, Common.Label: 'Aprobar (CO)'  );
+//     coordinadorRechazar @( Core.OperationAvailable: false, Common.Label: 'Rechazar (CO)' );
+// };
 annotate PagosService.TareasInbox actions {
-    apoderadoAprobar  @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esApoderado' } }, Common.Label: 'Aprobar'      );
-    apoderadoObservar @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esApoderado' } }, Common.Label: 'Observar'     );
-    liberadorLiberar  @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esLiberador' } }, Common.Label: 'Liberar'      );
-    liberadorRechazar @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esLiberador' } }, Common.Label: 'Rechazar'     );
-    liberadorAnular   @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esLiberador' } }, Common.Label: 'Anular'       );
+    apoderadoAprobar  @( Core.OperationAvailable: true, Common.Label: 'Aprobar'  );
+    apoderadoObservar @( Core.OperationAvailable: true, Common.Label: 'Observar' );
+    liberadorLiberar  @( Core.OperationAvailable: true, Common.Label: 'Liberar'  );
+    liberadorRechazar @( Core.OperationAvailable: true, Common.Label: 'Rechazar' );
+    liberadorAnular   @( Core.OperationAvailable: true, Common.Label: 'Anular'   );
     coordinadorAprobar  @( Core.OperationAvailable: false, Common.Label: 'Aprobar (CO)'  );
     coordinadorRechazar @( Core.OperationAvailable: false, Common.Label: 'Rechazar (CO)' );
 };

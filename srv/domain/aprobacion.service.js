@@ -59,7 +59,7 @@ async function _prepararAccion(req, decision) {
     // 2. Leer la tarea BPA para obtener el taskDefinitionId real
     let tareaBpa;
     try {
-        tareaBpa = await bpaClient.leerTarea(instanceID);
+        tareaBpa = await bpaClient.obtenerTarea(instanceID);
     } catch (err) {
         LOG.error(`_prepararAccion | leerTarea falló | instanceID=${instanceID}`, err.message);
         return req.error(502, "No se pudo consultar la tarea en BPA Workflow");
@@ -84,7 +84,7 @@ async function _prepararAccion(req, decision) {
     // 5. Leer el contexto de la propuesta desde BPA (ruta según el rol)
     let propuesta;
     try {
-        const contextoCompleto = await bpaClient.leerContexto(instanceID);
+        const contextoCompleto = await bpaClient.readContext(instanceID);
         propuesta = _navegarRuta(contextoCompleto, rolBpa.contextPath);
     } catch (err) {
         LOG.error(`_prepararAccion | leerContexto falló | instanceID=${instanceID}`, err.message);
@@ -187,8 +187,10 @@ function registrarHandlers(srv) {
 
         await bpaClient.completarTarea(
             instanceID,
-            "aprobar",
-            _armarContextoBpa(rolBpa, comentario, instanceID)
+            {
+                decision: "aprobar",
+                contexto: _armarContextoBpa(rolBpa, comentario, instanceID),
+            }
         );
 
         LOG.info(`apoderadoAprobar OK | instanceID=${instanceID}`);
@@ -211,8 +213,10 @@ function registrarHandlers(srv) {
 
         await bpaClient.completarTarea(
             instanceID,
-            "observar",
-            _armarContextoBpa(rolBpa, comentario, instanceID)
+            {
+                decision: "observar",
+                contexto: _armarContextoBpa(rolBpa, comentario, instanceID),
+            }
         );
 
         LOG.info(`apoderadoObservar OK | instanceID=${instanceID}`);
@@ -236,8 +240,10 @@ function registrarHandlers(srv) {
 
         await bpaClient.completarTarea(
             instanceID,
-            "liberar",
-            _armarContextoBpa(rolBpa, comentario, instanceID)
+            {
+                decision: "liberar",
+                contexto: _armarContextoBpa(rolBpa, comentario, instanceID),
+            }
         );
 
         LOG.info(`liberadorLiberar OK | instanceID=${instanceID}`);
@@ -260,8 +266,10 @@ function registrarHandlers(srv) {
 
         await bpaClient.completarTarea(
             instanceID,
-            "rechazar",
-            _armarContextoBpa(rolBpa, comentario, instanceID)
+            {
+                decision: "rechazar",
+                contexto: _armarContextoBpa(rolBpa, comentario, instanceID),
+            }
         );
 
         LOG.info(`liberadorRechazar OK | instanceID=${instanceID}`);
@@ -284,8 +292,10 @@ function registrarHandlers(srv) {
 
         await bpaClient.completarTarea(
             instanceID,
-            "anular",
-            _armarContextoBpa(rolBpa, comentario, instanceID)
+            {
+                decision: "anular",
+                contexto: _armarContextoBpa(rolBpa, comentario, instanceID),
+            }
         );
 
         LOG.info(`liberadorAnular OK | instanceID=${instanceID}`);
