@@ -53,7 +53,7 @@ async function _prepararAccion(req, decision) {
     // 1. Clave de la tarea desde los parámetros de ruta OData (nunca del body)
     const instanceID = req.params?.[0]?.instanceID ?? req.params?.[0];
     if (!instanceID) {
-        return req.error(400, "Falta el identificador de tarea (instanceID)");
+        return req.reject(400, "Falta el identificador de tarea (instanceID)");
     }
 
     // 2. Leer la tarea BPA para obtener el taskDefinitionId real
@@ -62,7 +62,7 @@ async function _prepararAccion(req, decision) {
         tareaBpa = await bpaClient.obtenerTarea(instanceID);
     } catch (err) {
         LOG.error(`_prepararAccion | leerTarea falló | instanceID=${instanceID}`, err.message);
-        return req.error(502, "No se pudo consultar la tarea en BPA Workflow");
+        return req.reject(502, "No se pudo consultar la tarea en BPA Workflow");
     }
 
     // Normalizar el taskDefinitionId (BPA puede devolverlo como "form_xxx@defId")
@@ -72,13 +72,13 @@ async function _prepararAccion(req, decision) {
     const rolBpa = perfiles.resolverRolBpa(taskDefId);
     if (!rolBpa || !rolBpa.activo) {
         LOG.error(`_prepararAccion | rol inactivo o desconocido | taskDefId=${taskDefId}`);
-        return req.error(403, "Esta tarea no corresponde a un rol activo en el flujo de aprobación");
+        return req.reject(403, "Esta tarea no corresponde a un rol activo en el flujo de aprobación");
     }
 
     // 4. Validar que la decisión es válida para este rol (anti-tampering)
     if (!perfiles.esDecisionValida(taskDefId, decision)) {
         LOG.error(`_prepararAccion | decisión inválida | decision=${decision} taskDefId=${taskDefId}`);
-        return req.error(400, `La decisión "${decision}" no es válida para este rol`);
+        return req.reject(400, `La decisión "${decision}" no es válida para este rol`);
     }
 
     // 5. Leer el contexto de la propuesta desde BPA (ruta según el rol)
@@ -88,11 +88,11 @@ async function _prepararAccion(req, decision) {
         propuesta = _navegarRuta(contextoCompleto, rolBpa.contextPath);
     } catch (err) {
         LOG.error(`_prepararAccion | leerContexto falló | instanceID=${instanceID}`, err.message);
-        return req.error(502, "No se pudo leer el contexto de la propuesta en BPA");
+        return req.reject(502, "No se pudo leer el contexto de la propuesta en BPA");
     }
 
     if (!propuesta) {
-        return req.error(502, `La propuesta no existe en la ruta de contexto: ${rolBpa.contextPath}`);
+        return req.reject(502, `La propuesta no existe en la ruta de contexto: ${rolBpa.contextPath}`);
     }
 
     // 6. Usuario autenticado desde XSUAA (única fuente de verdad del firmante)
@@ -181,7 +181,6 @@ function registrarHandlers(srv) {
      */
     srv.on("apoderadoAprobar", "TareasInbox", async (req) => {
         const accion = await _prepararAccion(req, "aprobar");
-        if (!accion) return; // req.error ya fue invocado
 
         const { instanceID, rolBpa, comentario } = accion;
 
@@ -203,7 +202,6 @@ function registrarHandlers(srv) {
      */
     srv.on("apoderadoObservar", "TareasInbox", async (req) => {
         const accion = await _prepararAccion(req, "observar");
-        if (!accion) return;
 
         const { instanceID, rolBpa, comentario } = accion;
 
@@ -234,7 +232,6 @@ function registrarHandlers(srv) {
      */
     srv.on("liberadorLiberar", "TareasInbox", async (req) => {
         const accion = await _prepararAccion(req, "liberar");
-        if (!accion) return;
 
         const { instanceID, rolBpa, comentario } = accion;
 
@@ -256,7 +253,6 @@ function registrarHandlers(srv) {
      */
     srv.on("liberadorRechazar", "TareasInbox", async (req) => {
         const accion = await _prepararAccion(req, "rechazar");
-        if (!accion) return;
 
         const { instanceID, rolBpa, comentario } = accion;
 
@@ -282,7 +278,6 @@ function registrarHandlers(srv) {
      */
     srv.on("liberadorAnular", "TareasInbox", async (req) => {
         const accion = await _prepararAccion(req, "anular");
-        if (!accion) return;
 
         const { instanceID, rolBpa, comentario } = accion;
 

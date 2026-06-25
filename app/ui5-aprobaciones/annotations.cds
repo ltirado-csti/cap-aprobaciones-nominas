@@ -55,14 +55,28 @@ annotate PagosService.TareasInbox with @(
     // taskDefinitionId desde BPA — anti-tampering garantizado).
     // TODO: reimplementar visibilidad por rol vía sap.fe Side Effects o
     // UI.Hidden estático una vez validado el flujo completo en QAS.
+    // Botones de acción del header del Object Page.
+    // Referencia oficial SAP para acción bound: '<Servicio>.<NombreAcción>' (sin prefijo de entidad).
+    //
+    // Visibilidad por rol vía ![@UI.Hidden] dinámico ($edmJson/$Not/$Path):
+    //   - Apoderado (esApoderado=true): ve Aprobar y Observar.
+    //   - Liberador (esLiberador=true): ve Liberar, Rechazar y Anular.
+    //   - Coordinador: anulado en v1.1.0 → ![@UI.Hidden]: true (constante).
+    // Requiere que esApoderado/esLiberador estén en el $select del Object Page;
+    // por eso se incluyen como campos ocultos en UI.FieldGroup#DatosGenerales.
     UI.Identification: [
-        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.TareasInbox_apoderadoAprobar',  Label: 'Aprobar',      Criticality: #Positive  },
-        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.TareasInbox_apoderadoObservar', Label: 'Observar',     Criticality: #Critical  },
-        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.TareasInbox_liberadorLiberar',  Label: 'Liberar',      Criticality: #Positive  },
-        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.TareasInbox_liberadorRechazar', Label: 'Rechazar',     Criticality: #Negative  },
-        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.TareasInbox_liberadorAnular',   Label: 'Anular',       Criticality: #Negative  },
-        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.TareasInbox_coordinadorAprobar',  Label: 'Aprobar (CO)',  ![@UI.Hidden]: true },
-        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.TareasInbox_coordinadorRechazar', Label: 'Rechazar (CO)', ![@UI.Hidden]: true },
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.apoderadoAprobar',  Label: 'Aprobar',  Criticality: #Positive,
+          ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esApoderado' }] } } },
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.apoderadoObservar', Label: 'Observar', Criticality: #Critical,
+          ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esApoderado' }] } } },
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.liberadorLiberar',  Label: 'Liberar',  Criticality: #Positive,
+          ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esLiberador' }] } } },
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.liberadorRechazar', Label: 'Rechazar', Criticality: #Negative,
+          ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esLiberador' }] } } },
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.liberadorAnular',   Label: 'Anular',   Criticality: #Negative,
+          ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esLiberador' }] } } },
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.coordinadorAprobar',  Label: 'Aprobar (CO)',  ![@UI.Hidden]: true },
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.coordinadorRechazar', Label: 'Rechazar (CO)', ![@UI.Hidden]: true },
     ],
 
     // ── Header del Object Page ────────────────────────────────────────────────
@@ -102,6 +116,11 @@ annotate PagosService.TareasInbox with @(
             { $Type: 'UI.DataField',        Value: analista,              Label: 'Analista' },
             { $Type: 'UI.DataField',        Value: usuarioCreacion,       Label: 'Creado por' },
             { $Type: 'UI.DataFieldWithUrl', Value: urlPDF, Url: urlPDF,  Label: 'PDF' },
+            // Flags de rol ocultos: NO se renderizan (![@UI.Hidden]: true) pero
+            // fuerzan que esApoderado/esLiberador entren al $select del Object Page,
+            // para que el ![@UI.Hidden] dinámico de los botones del header pueda evaluar.
+            { $Type: 'UI.DataField', Value: esApoderado, ![@UI.Hidden]: true },
+            { $Type: 'UI.DataField', Value: esLiberador, ![@UI.Hidden]: true },
         ],
     },
 );

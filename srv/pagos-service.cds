@@ -8,10 +8,6 @@
 // Estado BPA v1.1.5:
 //   Roles activos en flujo: Apoderado1, Apoderado2, Liberador.
 //   Coordinador: anulado en v1.1.0 — acciones conservadas para uso futuro.
-//
-// NOTA CDS 9.x: las acciones bound se declaran con
-//   extend entity X with actions { ... }
-//   fuera del cuerpo de la entidad pero dentro del service.
 // =============================================================================
 
 // =============================================================================
@@ -151,9 +147,14 @@ service PagosService @(path: '/nomina/aprobaciones') {
 
         // Apoderado (AP1 y AP2) — contexto BPA: startEvent.body
         // Visibilidad: esApoderado = true | Decisiones: aprobar | observar
+        //
+        // Regla de negocio BPA: Aprobar/Liberar NO llevan parámetro → Fiori
+        // Elements los ejecuta directamente. Observar/Rechazar/Anular llevan
+        // (comentario: String) → FE genera automáticamente el diálogo de
+        // parámetro para capturar el motivo antes de invocar la acción.
 
-        // El apoderado confirma la propuesta de nómina
-        action apoderadoAprobar(comentario: String)  returns AccionResult;
+        // El apoderado confirma la propuesta de nómina (ejecución directa)
+        action apoderadoAprobar()                     returns AccionResult;
 
         // El apoderado devuelve la propuesta al analista con una observación
         action apoderadoObservar(comentario: String) returns AccionResult;
@@ -162,7 +163,7 @@ service PagosService @(path: '/nomina/aprobaciones') {
         // Visibilidad: esLiberador = true | Decisiones: liberar | rechazar | anular
 
         // El liberador autoriza el desembolso de la nómina
-        action liberadorLiberar(comentario: String)  returns AccionResult;
+        action liberadorLiberar()                     returns AccionResult;
 
         // El liberador rechaza la propuesta (regresa al flujo de apoderados)
         action liberadorRechazar(comentario: String) returns AccionResult;
