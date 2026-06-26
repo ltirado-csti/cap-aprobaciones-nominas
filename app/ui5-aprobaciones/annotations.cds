@@ -38,6 +38,12 @@ annotate PagosService.TareasInbox with @(
         { $Type: 'UI.DataField', Value: fechaPropuestaPago, Label: 'Fecha PP',   ![@UI.Importance]: #High },
         // { $Type: 'UI.DataField', Value: analista,        Label: 'Analista',   ![@UI.Importance]: #High },
 
+        // Acción masiva de la toolbar del List Report — reusa la bound action
+        // apoderadoAprobar(). FE la invoca una vez por contexto seleccionado en
+        // un $batch (selectionMode: Multi en el manifest). Su habilitación la
+        // controla Core.OperationAvailable: { $Path: 'esApoderado' } más abajo.
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.apoderadoAprobar', Label: 'Aprobar masivo' },
+
         // Flags de rol — ocultos, necesarios en $select para visibilidad de botones en Object Page
         { $Type: 'UI.DataField', Value: esApoderado1,  ![@UI.Hidden]: true },
         { $Type: 'UI.DataField', Value: esApoderado2,  ![@UI.Hidden]: true },
@@ -138,7 +144,7 @@ annotate PagosService.TareasInbox with @(
 //     coordinadorRechazar @( Core.OperationAvailable: false, Common.Label: 'Rechazar (CO)' );
 // };
 annotate PagosService.TareasInbox actions {
-    apoderadoAprobar  @( Core.OperationAvailable: true, Common.Label: 'Aprobar'  );
+    apoderadoAprobar  @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esApoderado' } }, Common.Label: 'Aprobar'  );
     apoderadoObservar @( Core.OperationAvailable: true, Common.Label: 'Observar' );
     liberadorLiberar  @( Core.OperationAvailable: true, Common.Label: 'Liberar'  );
     liberadorRechazar @( Core.OperationAvailable: true, Common.Label: 'Rechazar' );
