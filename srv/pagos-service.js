@@ -16,9 +16,6 @@
  *   Apoderado1 / Apoderado2 → apoderadoAprobar | apoderadoObservar
  *   Liberador               → liberadorLiberar | liberadorRechazar | liberadorAnular
  *   Coordinador             → ANULADO — retorna 501 si se invoca
- *
- * Arquitectura: CAP es orquestador. No llama a CPI para registrar decisiones;
- * BPA ejecuta el ActionTask ZhrfApoReg que llama a CPI directamente.
  */
 
 const cds      = require("@sap/cds");
@@ -211,10 +208,11 @@ class PagosService extends cds.ApplicationService {
 /**
  * Obtiene y enriquece la lista de tareas BPA con su contexto.
  * Origen legado: Master.controller.js → getInboxTasks() + readContext()
+ * @param {string} usuario - Email del usuario autenticado (req.user.id)
  */
-async function _obtenerTareasBpa() {
+async function _obtenerTareasBpa(usuario) {
   try {
-    const tareas = await bpa.getInboxTasks();
+    const tareas = await bpa.getInboxTasks(usuario);
     if (!tareas.length) return [];
 
     const tareasEnriquecidas = await Promise.all(

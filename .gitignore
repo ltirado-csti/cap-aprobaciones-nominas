@@ -2,6 +2,7 @@ node_modules/
 target/
 _out/
 gen/
+app/ui5-aprobaciones/dist/
 
 .cdsrc-private.json
 default-*.json

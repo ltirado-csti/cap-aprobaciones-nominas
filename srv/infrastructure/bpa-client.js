@@ -30,23 +30,32 @@ const getSvc = async () => (_svc ??= await cds.connect.to("BPA_WORKFLOW"));
 // ─── OBTENER TAREAS DEL INBOX ─────────────────────────────────────────────────
 
 /**
- * Obtiene las tareas pendientes del Inbox para el usuario autenticado.
- * Máximo 20 tareas — suficiente para una bandeja de aprobación de nómina.
- *
  * Endpoint verificado: GET /public/workflow/rest/v1/task-instances
  *
  * @returns {Promise<Array>} Lista de tareas BPA sin transformar (máx. 20)
  */
 async function getInboxTasks() {
+  // Salvaguarda: sin usuario no se consulta BPA — evita exponer tareas ajenas
+  if (!usuario) {
+    LOG.warn("getInboxTasks | usuario no informado — se retorna lista vacía");
+    return [];
+  }
+ 
   const svc = await getSvc();
-
-  const tareas = await svc.get("/task-instances", {
-    "$filter" : "status eq 'READY'",
-    "$orderby": "createdAt desc",
-    "$top"    : 20
+ 
+  // Los parámetros van en la query string: es la forma inequívoca de enviarlos
+  // en un servicio remoto REST de CAP (el objeto como segundo argumento no
+  // garantiza serialización como query params)
+  const parametros = new URLSearchParams({
+    status         : "READY",
+    recipientUsers : usuario,
+    "$orderby"     : "createdAt desc",
+    "$top"         : "100",
   });
-
-  LOG.info(`getInboxTasks OK | tareas=${tareas?.length ?? 0}`);
+ 
+  const tareas = await svc.get(`/task-instances?${parametros.toString()}`);
+ 
+  LOG.info(`getInboxTasks OK | usuario=${usuario} tareas=${tareas?.length ?? 0}`);
   return Array.isArray(tareas) ? tareas : [];
 }
 
