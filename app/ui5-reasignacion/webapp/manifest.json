@@ -1,7 +1,7 @@
 {
   "_version": "1.65.0",
   "sap.app": {
-    "id": "centria.h2hpp.aprobaciones.ui5aprobaciones",
+    "id": "centria.h2hpp.aprobaciones.ui5reasignacion",
     "type": "application",
     "i18n": "i18n/i18n.properties",
     "applicationVersion": {
@@ -11,7 +11,7 @@
     "description": "{{appDescription}}",
     "dataSources": {
       "mainService": {
-        "uri": "/nomina/aprobaciones/",
+        "uri": "/nomina/reasignacion/",
         "type": "OData",
         "settings": {
           "odataVersion": "4.0",
@@ -21,12 +21,12 @@
     },
     "crossNavigation": {
       "inbounds": {
-        "NominaAprobacion-display": {
-          "semanticObject": "NominaAprobacion",
+        "NominaReasignacion-display": {
+          "semanticObject": "NominaReasignacion",
           "action": "display",
           "title": "{{appTitle}}",
           "subTitle": "{{appSubTitle}}",
-          "icon": "sap-icon://workflow-tasks",
+          "icon": "sap-icon://employee-approvals",
           "info": "{{appDescription}}",
           "signature": {
             "parameters": {},
@@ -40,7 +40,7 @@
   "sap.ui": {
     "technology": "UI5",
     "icons": {
-      "icon": "sap-icon://inbox"
+      "icon": "sap-icon://replace"
     },
     "deviceTypes": {
       "desktop": true,
@@ -50,15 +50,6 @@
   },
   "sap.ui5": {
     "flexEnabled": true,
-    "extends": {
-      "extensions": {
-        "sap.ui.controllerExtensions": {
-          "sap.fe.templates.ObjectPage.ObjectPageController": {
-            "controllerName": "centria.h2hpp.aprobaciones.ui5aprobaciones.ext.controller.AccionesHandler"
-          }
-        }
-      }
-    },
     "dependencies": {
       "minUI5Version": "1.148.1",
       "libs": {
@@ -76,7 +67,7 @@
       "i18n": {
         "type": "sap.ui.model.resource.ResourceModel",
         "settings": {
-          "bundleName": "centria.h2hpp.aprobaciones.ui5aprobaciones.i18n.i18n",
+          "bundleName": "centria.h2hpp.aprobaciones.ui5reasignacion.i18n.i18n",
           "supportedLocales": [
             ""
           ],
@@ -104,82 +95,41 @@
       "config": {
         "routerClass": "sap.f.routing.Router",
         "flexibleColumnLayout": {
-          "defaultTwoColumnLayoutType": "TwoColumnsMidExpanded",
-          "defaultThreeColumnLayoutType": "ThreeColumnsMidExpanded"
+          "defaultTwoColumnLayoutType": "TwoColumnsMidExpanded"
         }
       },
       "routes": [
         {
           "pattern": ":?query:",
-          "name": "TareasInboxList",
-          "target": "TareasInboxList"
-        },
-        {
-          "pattern": "TareasInbox({key}):?query:",
-          "name": "TareasInboxObjectPage",
-          "target": [
-            "TareasInboxList",
-            "TareasInboxObjectPage"
-          ]
+          "name": "TareasEnCursoList",
+          "target": "TareasEnCursoList"
         }
       ],
       "targets": {
-        "TareasInboxList": {
+        "TareasEnCursoList": {
           "type": "Component",
-          "id": "TareasInboxList",
+          "id": "TareasEnCursoList",
           "name": "sap.fe.templates.ListReport",
           "controlAggregation": "beginColumnPages",
           "contextPattern": "",
           "options": {
             "settings": {
-              "entitySet": "TareasInbox",
+              "entitySet": "TareasEnCurso",
               "variantManagement": "None",
               "initialLoad": true,
-              "hideFilterBar": true,
-              "navigation": {
-                "TareasInbox": {
-                  "detail": {
-                    "route": "TareasInboxObjectPage"
-                  }
-                }
-              },
               "controlConfiguration": {
                 "@com.sap.vocabularies.UI.v1.LineItem": {
                   "tableSettings": {
                     "type": "ResponsiveTable",
-                    "selectionMode": "Multi",
+                    "selectionMode": "None",
                     "enableExport": true,
                     "enableFullScreen": false
-                  }
-                }
-              }
-            }
-          }
-        },
-        "TareasInboxObjectPage": {
-          "type": "Component",
-          "id": "TareasInboxObjectPage",
-          "name": "sap.fe.templates.ObjectPage",
-          "controlAggregation": "midColumnPages",
-          "contextPattern": "TareasInbox({key})",
-          "options": {
-            "settings": {
-              "entitySet": "TareasInbox",
-              "editableHeaderContent": false,
-              "controlConfiguration": {
-                "proveedores/@com.sap.vocabularies.UI.v1.LineItem": {
-                  "tableSettings": {
-                    "type": "ResponsiveTable"
-                  }
-                },
-                "adjuntos/@com.sap.vocabularies.UI.v1.LineItem": {
-                  "tableSettings": {
-                    "type": "ResponsiveTable"
-                  }
-                },
-                "aprobadores/@com.sap.vocabularies.UI.v1.LineItem": {
-                  "tableSettings": {
-                    "type": "ResponsiveTable"
+                  },
+                  "columns": {
+                    "rolTarea": { "width": "9rem" },
+                    "usuarioActual": { "width": "16rem" },
+                    "importe": { "width": "8rem" },
+                    "estadoTarea": { "width": "7rem" }
                   }
                 }
               }

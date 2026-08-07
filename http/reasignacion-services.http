@@ -1,0 +1,21 @@
+@server=http://localhost:4004
+@path=/nomina/reasignacion
+
+
+### Metadata
+GET {{server}}{{path}}/$metadata
+
+###
+
+### GET List Report — tareas en curso de todos los usuarios (READY + RESERVED)
+GET {{server}}{{path}}/TareasEnCurso
+
+###
+
+### POST Reasignar — reemplaza el destinatario actual de la tarea por otro usuario
+POST {{server}}{{path}}/TareasEnCurso(instanceID='mock-task-101')/ReasignacionService.reasignar
+Content-Type: application/json
+
+{
+  "nuevoUsuario": "suplente@centria.net"
+}

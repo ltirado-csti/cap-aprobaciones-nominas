@@ -21,6 +21,7 @@
     "bind:dest": "cds bind --to destination",
     "bind:bpa": "cds bind --to BPA_WORKFLOW_INSTANCE",
     "watch-ui5-aprobaciones": "cds watch --open centria.h2hpp.aprobaciones.ui5aprobaciones/index.html?sap-ui-xx-viewCache=false --livereload false",
+    "watch-ui5-reasignacion": "cds watch --open centria.h2hpp.aprobaciones.ui5reasignacion/index.html?sap-ui-xx-viewCache=false --livereload false",
     "undeploy": "cf undeploy cap-aprobacion-nomina --delete-services --delete-service-keys --delete-service-brokers",
     "build": "rimraf resources mta_archives && mbt build --mtar archive",
     "deploy": "cf deploy mta_archives/cap-aprobacion-nomina_1.0.0.mtar --retries 1"
@@ -30,7 +31,8 @@
     "app/*"
   ],
   "sapux": [
-    "app/ui5-aprobaciones"
+    "app/ui5-aprobaciones",
+    "app/ui5-reasignacion"
   ],
   "cds": {
     "requires": {
@@ -49,6 +51,9 @@
         "apps": [
           {
             "local": "app/ui5-aprobaciones"
+          },
+          {
+            "local": "app/ui5-reasignacion"
           }
         ]
       }

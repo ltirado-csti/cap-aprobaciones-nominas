@@ -87,11 +87,27 @@ modules:
             - centriah2hppaprobacionesui5aprobaciones.zip
           name: centriah2hppaprobacionesui5aprobaciones
           target-path: resources/
+        - artifacts:
+            - centriah2hppaprobacionesui5reasignacion.zip
+          name: centriah2hppaprobacionesui5reasignacion
+          target-path: resources/
 
   # ----------------- FIORI ELEMENT APPLICATION -----------------
   - name: centriah2hppaprobacionesui5aprobaciones
     type: html
     path: app/ui5-aprobaciones
+    build-parameters:
+      build-result: dist
+      builder: custom
+      commands:
+        - npm install
+        - npm run build
+      supported-platforms: []
+
+  # ----------------- FIORI ELEMENT APPLICATION: REASIGNACIÓN -----------------
+  - name: centriah2hppaprobacionesui5reasignacion
+    type: html
+    path: app/ui5-reasignacion
     build-parameters:
       build-result: dist
       builder: custom

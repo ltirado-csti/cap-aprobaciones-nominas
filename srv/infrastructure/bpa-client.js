@@ -12,9 +12,11 @@
  *
  * Métodos expuestos:
  *   getInboxTasks()                       → GET   /v1/task-instances
+ *   listarTareasEnCurso()                 → GET   /v1/task-instances (todos los usuarios)
  *   obtenerTarea(taskId)                  → GET   /v1/task-instances/{id}
  *   readContext(taskId)                   → GET   /v1/task-instances/{id}/context
  *   completarTarea(taskId, opciones)      → PATCH /v1/task-instances/{id}
+ *   reasignarTarea(taskId, nuevoUsuario)  → PATCH /v1/task-instances/{id}
  *   iniciarInstancia(definitionId, ctx)   → POST  /v1/workflow-instances
  *   obtenerEstadoInstancia(instanceId)    → GET   /v1/workflow-instances/{id}
  *   cerrarFlujo(instanceId)               → PATCH /v1/workflow-instances/{id}
@@ -32,9 +34,10 @@ const getSvc = async () => (_svc ??= await cds.connect.to("BPA_WORKFLOW"));
 /**
  * Endpoint verificado: GET /public/workflow/rest/v1/task-instances
  *
+ * @param {string} usuario - email del usuario autenticado (req.user.id)
  * @returns {Promise<Array>} Lista de tareas BPA sin transformar (máx. 20)
  */
-async function getInboxTasks() {
+async function getInboxTasks(usuario) {
   // Salvaguarda: sin usuario no se consulta BPA — evita exponer tareas ajenas
   if (!usuario) {
     LOG.warn("getInboxTasks | usuario no informado — se retorna lista vacía");
@@ -57,6 +60,52 @@ async function getInboxTasks() {
  
   LOG.info(`getInboxTasks OK | usuario=${usuario} tareas=${tareas?.length ?? 0}`);
   return Array.isArray(tareas) ? tareas : [];
+}
+
+// ─── LISTAR TAREAS EN CURSO (TODOS LOS USUARIOS) ──────────────────────────────
+
+/**
+ * Lista las tareas de aprobación en curso (READY o RESERVED) de TODOS los
+ * usuarios, sin filtrar por recipientUsers. Usada por la app de reasignación
+ * para que un administrador pueda ver y reasignar tareas ajenas.
+ *
+ * IMPORTANTE: a diferencia de getInboxTasks(), esta consulta requiere que la
+ * IDENTIDAD detrás del destino BPA_WORKFLOW (no el destino en sí — los role
+ * collections se asignan a identidades, nunca a un destino) tenga el role
+ * collection "WorkflowAdmin" en el subaccount de Process Automation. Sin él,
+ * BPA solo devuelve tareas del propio usuario autenticado.
+ * Pendiente de confirmar con el administrador del subaccount de BPA: el
+ * destino actual (sap_process_automation_service, vía cds bind) autentica
+ * como un cliente OAuth técnico (client credentials) — falta verificar si
+ * WorkflowAdmin puede otorgarse a ese principal técnico o si esta llamada
+ * exige el token de un usuario de negocio real con el rol asignado.
+ *
+ * Endpoint verificado: GET /public/workflow/rest/v1/task-instances
+ *
+ * @returns {Promise<Array>} Lista combinada de tareas BPA sin transformar (READY + RESERVED)
+ */
+async function listarTareasEnCurso() {
+  const svc = await getSvc();
+  const estados = ["READY", "RESERVED"];
+
+  const resultados = await Promise.all(estados.map(async (status) => {
+    const parametros = new URLSearchParams({
+      status,
+      "$orderby": "createdAt desc",
+      "$top"    : "200",
+    });
+    try {
+      const tareas = await svc.get(`/task-instances?${parametros.toString()}`);
+      return Array.isArray(tareas) ? tareas : [];
+    } catch (error) {
+      LOG.error(`listarTareasEnCurso ERROR | status=${status}`, error.message);
+      return [];
+    }
+  }));
+
+  const todas = resultados.flat();
+  LOG.info(`listarTareasEnCurso OK | total=${todas.length}`);
+  return todas;
 }
 
 // ─── OBTENER TAREA INDIVIDUAL ─────────────────────────────────────────────────
@@ -149,6 +198,44 @@ async function completarTarea(taskId, { decision, contexto }) {
   }
 }
 
+// ─── REASIGNAR TAREA A OTRO USUARIO ───────────────────────────────────────────
+
+/**
+ * Reemplaza el destinatario (recipientUsers) de una tarea BPA por otro
+ * usuario. Usada por la app de reasignación cuando el destinatario original
+ * (Apoderado1, Apoderado2 o Liberador Final) no está disponible.
+ *
+ * IMPORTANTE: requiere que la IDENTIDAD detrás del destino BPA_WORKFLOW
+ * (el role collection se asigna a esa identidad, no al destino) tenga el
+ * role collection "WorkflowAdmin" en el subaccount de Process Automation —
+ * sin él, BPA rechaza el PATCH con 403. Ver nota de verificación pendiente
+ * en listarTareasEnCurso() sobre si esto exige un usuario de negocio real
+ * en vez del cliente OAuth técnico del destino actual.
+ *
+ * Endpoint verificado: PATCH /public/workflow/rest/v1/task-instances/{taskInstanceId}
+ *
+ * @param {string} taskId       - ID de la tarea BPA
+ * @param {string} nuevoUsuario - email del nuevo destinatario
+ * @returns {Promise<{ success: boolean, mensaje: string }>}
+ */
+async function reasignarTarea(taskId, nuevoUsuario) {
+  const svc = await getSvc();
+  try {
+    // recipientUsers es un string simple en el schema de BPA, NO un array
+    // — enviarlo como array dispara "Unable to parse the request content
+    // because it has an unexpected format or structure".
+    await svc.patch(`/task-instances/${taskId}`, {
+      recipientUsers: nuevoUsuario,
+    });
+
+    LOG.info(`reasignarTarea OK | taskId=${taskId} nuevoUsuario=${nuevoUsuario}`);
+    return { success: true, mensaje: "Tarea reasignada correctamente" };
+  } catch (error) {
+    LOG.error(`reasignarTarea ERROR | taskId=${taskId}`, error.message);
+    return { success: false, mensaje: error.message };
+  }
+}
+
 // ─── INICIAR INSTANCIA ────────────────────────────────────────────────────────
 
 /**
@@ -236,9 +323,11 @@ async function cerrarFlujo(instanceId) {
 
 module.exports = {
   getInboxTasks,
+  listarTareasEnCurso,
   obtenerTarea,
   readContext,
   completarTarea,
+  reasignarTarea,
   iniciarInstancia,
   obtenerEstadoInstancia,
   cerrarFlujo,

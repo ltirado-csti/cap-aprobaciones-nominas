@@ -95,6 +95,13 @@ const ROLES_BPA = {
         contextPath     : "startEvent.body",
         perfilCPI       : "AP",
         campoPropuesta  : "usuarioApoderado1",
+        // Variables personalizadas del contexto BPA (context.custom.*) escritas por
+        // el Script Task "Asigna resp. apo 1" tras la notificación a Payroll.
+        // Nombres EN MINÚSCULAS: es como están escritos en el BPMN desplegado
+        // (verificado en H2H Nomina 1.3.1), no en camelCase.
+        campoFlagNotif   : "flagerrornotifapo1",
+        campoMensajeNotif: "mensajenotifapo1",
+        label           : "Apoderado 1",
         activo          : true,
     },
 
@@ -111,6 +118,10 @@ const ROLES_BPA = {
         contextPath     : "startEvent.body",
         perfilCPI       : "AP",
         campoPropuesta  : "usuarioApoderado2",
+        // Escritas por el Script Task "Asigna resp. apo. 2" (minúsculas — ver apoderado1)
+        campoFlagNotif   : "flagerrornotifapo2",
+        campoMensajeNotif: "mensajenotifapo2",
+        label           : "Apoderado 2",
         activo          : true,
     },
 
@@ -127,6 +138,11 @@ const ROLES_BPA = {
         contextPath     : "startEvent.propuesta",
         perfilCPI       : "LI",
         campoPropuesta  : "usuarioLiberador",
+        // Escritas por el Script Task "Asigna resp Libera" del proceso RAÍZ
+        // (aprobacionDeNomina), no del subproceso de Apoderados.
+        campoFlagNotif   : "flagerrornotifliberador",
+        campoMensajeNotif: "mensajenotifliberador",
+        label           : "Liberador Final",
         activo          : true,
     },
 
@@ -259,17 +275,18 @@ function calcularFlagsRol(taskDefinitionId) {
 
 /**
  * Devuelve el rol BPA completo a partir del taskDefinitionId.
- * Usado internamente por aprobacion.service.js para leer decisiones y ruta.
+ * Usado internamente por aprobacion.service.js para leer decisiones y ruta,
+ * y por reasignacion.service.js para distinguir apoderado1/apoderado2/liberador.
  *
  * @param {string} taskDefinitionId
- * @returns {{ taskDefinitionId, decisiones, contextPath, perfilCPI, campoPropuesta, activo } | null}
+ * @returns {{ nombre, taskDefinitionId, decisiones, contextPath, perfilCPI, campoPropuesta, label, activo } | null}
  */
 function resolverRolBpa(taskDefinitionId) {
     const idNormalizado = (taskDefinitionId || "").split("@")[0];
     const entrada = Object.entries(ROLES_BPA).find(
         ([, rol]) => rol.taskDefinitionId === idNormalizado
     );
-    return entrada ? entrada[1] : null;
+    return entrada ? { nombre: entrada[0], ...entrada[1] } : null;
 }
 
 /**
@@ -308,6 +325,31 @@ function resolverPerfilCPI(taskDefinitionId) {
 }
 
 /**
+ * Devuelve los nombres de las variables personalizadas (context.custom.*) donde
+ * BPA deja el resultado de la notificación a Payroll para el rol de esta tarea.
+ *
+ * Contexto: al decidir, BPA notifica a Payroll vía CPI (iFlow ZhrfApoReg). Si
+ * Payroll rechaza, un Script Task escribe el flag y el mensaje en el contexto y
+ * el flujo hace loop back a la misma tarea, que reaparece en el inbox. CAP lee
+ * esas variables para mostrarle al usuario POR QUÉ volvió la tarea.
+ *
+ * Los nombres reales están en minúsculas (así se escribieron en el BPMN 1.3.1),
+ * a diferencia del camelCase que documentaba el diseño original.
+ *
+ * @param {string} taskDefinitionId
+ * @returns {{ campoFlag: string, campoMensaje: string } | null}
+ *          null si el rol no participa del ciclo de notificación (ej. Coordinador)
+ */
+function resolverCamposNotificacion(taskDefinitionId) {
+    const rol = resolverRolBpa(taskDefinitionId);
+    if (!rol || !rol.activo || !rol.campoFlagNotif) return null;
+    return {
+        campoFlag   : rol.campoFlagNotif,
+        campoMensaje: rol.campoMensajeNotif,
+    };
+}
+
+/**
  * Valida que la decisión sea válida para el taskDefinitionId dado.
  * Protección anti-tampering: evita que el cliente inyecte decisiones inválidas.
  *
@@ -338,5 +380,6 @@ module.exports = {
     resolverRolBpa,
     resolverContextPath,
     resolverPerfilCPI,
+    resolverCamposNotificacion,
     esDecisionValida,
 };

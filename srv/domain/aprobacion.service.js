@@ -158,6 +158,39 @@ function _armarContextoBpa(rolBpa, comentario, instanceID) {
 }
 
 // =============================================================================
+// FUNCIÓN INTERNA: _responder
+// Emite el resultado como MENSAJE OData además de devolverlo en el cuerpo.
+// =============================================================================
+
+/**
+ * Construye la respuesta de una acción de aprobación.
+ *
+ * Por qué req.info() y no sólo el campo `mensaje` del cuerpo:
+ *   Los botones del Object Page provienen de las anotaciones UI.Identification
+ *   (DataFieldForAction), así que los ejecuta Fiori Elements de forma nativa —
+ *   no el controller de la app. FE NO muestra el cuerpo de respuesta de una
+ *   acción, pero SÍ despliega automáticamente los mensajes que llegan en la
+ *   cabecera `sap-messages`, que es lo que req.info() alimenta.
+ *   Sin esto el usuario no recibe ninguna confirmación visible.
+ *
+ * Por qué el texto no afirma que Payroll aceptó:
+ *   completarTarea sólo obtiene el ACK de BPA. La notificación a Payroll corre
+ *   después, de forma asíncrona. Si Payroll rechaza, BPA hace loop back y la
+ *   tarea reaparece en el inbox con el motivo visible (notifTieneError /
+ *   notifMensaje). Prometer éxito aquí sería mentirle al usuario.
+ *
+ * @param {import('@sap/cds').Request} req
+ * @param {string} accion - texto en pasado, ej. "Aprobación enviada"
+ * @returns {{ exito: boolean, mensaje: string }}
+ */
+function _responder(req, accion) {
+    const mensaje = `${accion}. Payroll está validando la operación; ` +
+                    `si la rechaza, la tarea volverá a su bandeja con el motivo.`;
+    req.info(mensaje);
+    return { exito: true, mensaje };
+}
+
+// =============================================================================
 // EXPORTACIÓN: registrar handlers sobre el servicio PagosService
 // Llamado desde pagos-service.js en el bloque handle_aprobaciones()
 // =============================================================================
@@ -193,7 +226,7 @@ function registrarHandlers(srv) {
         );
 
         LOG.info(`apoderadoAprobar OK | instanceID=${instanceID}`);
-        return { exito: true, mensaje: "Propuesta aprobada correctamente" };
+        return _responder(req, "Aprobación enviada");
     });
 
     /**
@@ -218,7 +251,7 @@ function registrarHandlers(srv) {
         );
 
         LOG.info(`apoderadoObservar OK | instanceID=${instanceID}`);
-        return { exito: true, mensaje: "Observación registrada correctamente" };
+        return _responder(req, "Observación enviada");
     });
 
     // =========================================================================
@@ -244,7 +277,7 @@ function registrarHandlers(srv) {
         );
 
         LOG.info(`liberadorLiberar OK | instanceID=${instanceID}`);
-        return { exito: true, mensaje: "Nómina liberada correctamente" };
+        return _responder(req, "Liberación enviada");
     });
 
     /**
@@ -269,7 +302,7 @@ function registrarHandlers(srv) {
         );
 
         LOG.info(`liberadorRechazar OK | instanceID=${instanceID}`);
-        return { exito: true, mensaje: "Propuesta rechazada. Se notificará al analista." };
+        return _responder(req, "Rechazo enviado");
     });
 
     /**
@@ -294,7 +327,11 @@ function registrarHandlers(srv) {
         );
 
         LOG.info(`liberadorAnular OK | instanceID=${instanceID}`);
-        return { exito: true, mensaje: "Propuesta anulada correctamente." };
+        // La anulación cierra el proceso: no hay loop back posible, así que aquí
+        // sí es correcto afirmar el resultado sin condicionarlo a Payroll.
+        const mensaje = "Propuesta anulada. El flujo de aprobación queda cerrado.";
+        req.info(mensaje);
+        return { exito: true, mensaje };
     });
 
     // =========================================================================

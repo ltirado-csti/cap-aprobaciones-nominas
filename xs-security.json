@@ -1,5 +1,18 @@
 {
-  "scopes": [],
+  "scopes": [
+    {
+      "name": "$XSAPPNAME.Administrador",
+      "description": "Permite reasignar tareas de aprobación (Apoderado 1, Apoderado 2, Liberador Final) a otro usuario"
+    }
+  ],
   "attributes": [],
-  "role-templates": []
+  "role-templates": [
+    {
+      "name": "Administrador",
+      "description": "Administrador de reasignación de tareas de aprobación de nómina",
+      "scope-references": [
+        "$XSAPPNAME.Administrador"
+      ]
+    }
+  ]
 }

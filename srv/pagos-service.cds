@@ -101,6 +101,7 @@ service PagosService @(path: '/nomina/aprobaciones') {
 
         // Campos del Object Page — escalares de la propuesta
         estadoPP                : String(50);
+        estadoCriticidad        : Integer;    // UI.CriticalityType: 0=Neutral 1=Negative 2=Critical 3=Positive — controla color/ícono de estadoPP
         urlPDF                  : String(500);
         modalidadPP             : String(20);
         viaPago                 : String(5);
@@ -121,6 +122,15 @@ service PagosService @(path: '/nomina/aprobaciones') {
         usuarioCaja             : String(100);
         estaAnulado             : Boolean;
         estaTerminado           : Boolean;
+
+        // Resultado de la notificación a Payroll (ECP vía CPI) del intento anterior.
+        // BPA notifica a Payroll al decidir; si Payroll rechaza, el flujo hace loop
+        // back y la tarea REAPARECE en el inbox. Estos campos explican por qué.
+        // Origen: context.custom.* del contexto BPA (ver perfiles.resolverCamposNotificacion).
+        // Vacíos en el primer intento — solo se pueblan tras un rechazo de Payroll.
+        notifTieneError         : Boolean;          // true si Payroll devolvió EpFlagError = "X"
+        notifMensaje            : String(500);      // EpMensaje — texto de negocio de Payroll
+        notifCriticidad         : Integer;          // UI.CriticalityType: 1=Negative si hay error, 0=Neutral
 
         // Flags de visibilidad por rol — calculados por perfiles.calcularFlagsRol()
         // XSUAA + taskDefinitionId son la única fuente de verdad del rol.

@@ -119,7 +119,7 @@ class PagosService extends cds.ApplicationService {
 
       // Sin clave → List Report
       if (!instanceID) {
-        const tareas = await _obtenerTareasBpa();
+        const tareas = await _obtenerTareasBpa(req.user.id);
         tareas.$count = tareas.length;
         return tareas;
       }
@@ -243,6 +243,52 @@ function _extraerPropuesta(contexto) {
 }
 
 /**
+ * Extrae el resultado de la notificación a Payroll desde context.custom.*
+ *
+ * BPA notifica a Payroll (ECP vía CPI) tras cada decisión. Si Payroll rechaza,
+ * un Script Task escribe el flag y el mensaje en las variables personalizadas y
+ * el flujo hace loop back: la tarea reaparece en el inbox del mismo usuario.
+ * Estos campos son lo que le explica al usuario por qué volvió.
+ *
+ * Los nombres de variable dependen del rol y viven en perfiles.js — están en
+ * minúsculas porque así se escribieron en el BPMN 1.3.1.
+ *
+ * La búsqueda es case-insensitive a propósito: el proyecto ya sufrió un desajuste
+ * de mayúsculas entre el diseño documentado y el BPMN desplegado, así que si
+ * alguien normaliza los nombres en BPA esto sigue funcionando sin tocar CAP.
+ *
+ * @param {object} contexto    - contexto BPA completo (incluye la rama `custom`)
+ * @param {string} activityId  - taskDefinitionId, determina qué par de campos leer
+ * @returns {{ notifTieneError: boolean, notifMensaje: string, notifCriticidad: number }}
+ */
+function _extraerNotificacion(contexto, activityId) {
+  const vacio = { notifTieneError: false, notifMensaje: "", notifCriticidad: 0 };
+
+  const campos = perfiles.resolverCamposNotificacion(activityId);
+  const custom = contexto?.custom;
+  if (!campos || !custom || typeof custom !== "object") return vacio;
+
+  // Índice en minúsculas para tolerar cualquier variación de capitalización
+  const porNombre = new Map(
+    Object.entries(custom).map(([clave, valor]) => [clave.toLowerCase(), valor])
+  );
+
+  const flag    = porNombre.get(campos.campoFlag.toLowerCase());
+  const mensaje = porNombre.get(campos.campoMensaje.toLowerCase());
+
+  // Payroll marca error con "X" (EpFlagError); vacío o ausente significa OK
+  const tieneError = String(flag ?? "").trim().toUpperCase() === "X";
+  if (!tieneError) return vacio;
+
+  return {
+    notifTieneError: true,
+    notifMensaje   : String(mensaje ?? "").trim() ||
+                     "Payroll rechazó la operación sin detallar el motivo.",
+    notifCriticidad: 1,   // UI.CriticalityType.Negative → se pinta en rojo
+  };
+}
+
+/**
  * Mapea un contexto BPA al shape de TareasInbox SIN llamar a CPI.
  * Usado por la ruta de $select liviano del READ.
  */
@@ -252,6 +298,7 @@ function _mapearContextoBpa(instanceID, contexto, activityId) {
     instanceID,
     activityId,
     propuesta,
+    notificacion: _extraerNotificacion(contexto, activityId),
     proveedores : [],
     adjuntos    : [],
     aprobadores : [],
@@ -288,6 +335,9 @@ async function _enriquecerConContexto(tarea) {
       usuarioCreacion    : propuesta.usuarioCreacion    ?? "",
       correoAnalista     : propuesta.correoAnalista     ?? "",
       ...flagsRol,
+      // Resultado del intento anterior: si Payroll rechazó, la tarea reapareció
+      // por loop back y el usuario debe ver el motivo ya desde la lista.
+      ..._extraerNotificacion(contexto, tarea.activityId),
       estaTerminado,
       estaAnulado,
       puedeTerminarFlujo : flagsRol.esCoordinador && estaTerminado,
@@ -304,6 +354,7 @@ async function _enriquecerConContexto(tarea) {
       version            : "", fechaPropuestaPago: "", usuarioCreacion: "",
       correoAnalista     : "",
       ...flagsRol,
+      notifTieneError    : false, notifMensaje: "", notifCriticidad: 0,
       estaTerminado      : false, estaAnulado: false,
       puedeTerminarFlujo : false, puedeAnular: false,
     };
@@ -341,6 +392,7 @@ async function _obtenerDetalleTarea(instanceID) {
       instanceID,
       activityId: tarea?.activityId,
       propuesta,
+      notificacion: _extraerNotificacion(contexto, tarea?.activityId),
       proveedores,
       adjuntos,
       aprobadores,
@@ -360,7 +412,20 @@ async function _obtenerDetalleTarea(instanceID) {
  * Flags de estado (estaTerminado, estaAnulado): desde contexto BPA.
  * Flags calculados Coordinador: puedeTerminarFlujo, puedeAnular.
  */
-function _ensamblarDetalle({ instanceID, activityId, propuesta, proveedores, adjuntos, aprobadores }) {
+function _ensamblarDetalle({ instanceID, activityId, propuesta, notificacion, proveedores, adjuntos, aprobadores }) {
+  const flagsRol      = perfiles.calcularFlagsRol(activityId);
+  const flagsNotif    = notificacion ??
+                        { notifTieneError: false, notifMensaje: "", notifCriticidad: 0 };
+  const flagsEstado   = {
+    estaTerminado : propuesta.estaTerminado ?? false,
+    estaAnulado   : propuesta.estaAnulado   ?? false,
+  };
+  const flagsCalculados = {
+    puedeTerminarFlujo : flagsRol.esCoordinador && flagsEstado.estaTerminado,
+    puedeAnular        : flagsRol.esCoordinador && flagsEstado.estaAnulado,
+  };
+  const estado = _calcularEstado(flagsRol, flagsEstado);
+
   const base = {
     instanceID,
     tituloTarea           : propuesta.tituloTarea,
@@ -380,7 +445,8 @@ function _ensamblarDetalle({ instanceID, activityId, propuesta, proveedores, adj
     correoAnalista        : propuesta.correoAnalista,
     existeDocumento       : propuesta.existeDocumento,
     indicadorPagoAdelanto : propuesta.indicadorPagoAdelanto,
-    estadoPP              : propuesta.estadoPP ?? "",
+    estadoPP              : estado.texto,
+    estadoCriticidad      : estado.criticidad,
     urlPDF                : `/nomina/aprobaciones/PropuestaPDF('${instanceID}')/contenido`,
     contadorFirma         : propuesta.contadorFirma,
     usuarioApoderado      : propuesta.usuarioApoderado,
@@ -390,25 +456,36 @@ function _ensamblarDetalle({ instanceID, activityId, propuesta, proveedores, adj
     usuariosSupervisores  : propuesta.usuariosSupervisores,
   };
 
-  const flagsRol      = perfiles.calcularFlagsRol(activityId);
-  const flagsEstado   = {
-    estaTerminado : propuesta.estaTerminado ?? false,
-    estaAnulado   : propuesta.estaAnulado   ?? false,
-  };
-  const flagsCalculados = {
-    puedeTerminarFlujo : flagsRol.esCoordinador && flagsEstado.estaTerminado,
-    puedeAnular        : flagsRol.esCoordinador && flagsEstado.estaAnulado,
-  };
-
   return {
     ...base,
     ...flagsRol,
+    ...flagsNotif,
     ...flagsEstado,
     ...flagsCalculados,
     proveedores,
     adjuntos,
     aprobadores,
   };
+}
+
+/**
+ * Deriva texto + criticidad de "Estado" a partir del rol pendiente (activityId)
+ * y los flags de cierre del flujo. No existe un campo "estadoPP" en el
+ * contexto BPA (PropuestaNomina) — era un campo de la arquitectura HANA
+ * anterior que nunca se migró — así que se calcula en vivo con lo único
+ * que BPA sí entrega: quién tiene la tarea pendiente y si el flujo cerró.
+ *
+ * criticidad sigue com.sap.vocabularies.UI.v1.CriticalityType:
+ *   0 Neutral | 1 Negative (rojo) | 2 Critical (ámbar) | 3 Positive (verde)
+ */
+function _calcularEstado(flagsRol, flagsEstado) {
+  if (flagsEstado.estaAnulado)   return { texto: "Anulado",                  criticidad: 1 };
+  if (flagsEstado.estaTerminado) return { texto: "Liberado",                 criticidad: 3 };
+  if (flagsRol.esLiberador)      return { texto: "Pendiente de Liberación",  criticidad: 2 };
+  if (flagsRol.esApoderado1)     return { texto: "Pendiente de Apoderado 1", criticidad: 2 };
+  if (flagsRol.esApoderado2)     return { texto: "Pendiente de Apoderado 2", criticidad: 2 };
+  if (flagsRol.esCoordinador)    return { texto: "Pendiente de Coordinador", criticidad: 2 };
+  return { texto: "Pendiente", criticidad: 0 };
 }
 
 /**
@@ -450,6 +527,11 @@ function _getMockTareas() {
       version: "0001", importe: "8500.00", moneda: "PEN",
       usuarioCreacion: "arodas@centria.net",
       estaTerminado: false, estaAnulado: false,
+      // Simula una tarea devuelta por el loop back de BPA: Payroll rechazó el
+      // intento anterior. Reproduce el formato real de EpMensaje observado en QAS.
+      notifTieneError: true,
+      notifMensaje   : "Correo no existe: usuario.prueba@ejemplo.com",
+      notifCriticidad: 1,
     },
     {
       instanceID: "mock-task-003",
@@ -466,6 +548,10 @@ function _getMockTareas() {
   return tareas.map(tarea => {
     const flagsRol = perfiles.calcularFlagsRol(tarea.activityId);
     return {
+      // Defaults sin rechazo: cada tarea puede sobrescribirlos arriba
+      notifTieneError   : false,
+      notifMensaje      : "",
+      notifCriticidad   : 0,
       ...tarea,
       ...flagsRol,
       puedeTerminarFlujo: flagsRol.esCoordinador && tarea.estaTerminado,
@@ -506,6 +592,11 @@ function _getMockDetalle(instanceID) {
     usuariosSupervisores  : [],
     // Simula rol Liberador para pruebas locales; cambiar activityId para otros roles.
     ...perfiles.calcularFlagsRol("form_aprobacionLiberadorFinal_1"),
+    // Sin rechazo de Payroll en el mock. Para probar la UI del error localmente,
+    // poner notifTieneError: true, un notifMensaje y notifCriticidad: 1.
+    notifTieneError       : false,
+    notifMensaje          : "",
+    notifCriticidad       : 0,
     estaTerminado         : false,
     estaAnulado           : false,
     puedeTerminarFlujo    : false,
