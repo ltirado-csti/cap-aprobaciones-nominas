@@ -2,7 +2,8 @@ node_modules/
 target/
 _out/
 gen/
-app/ui5-aprobaciones/dist/
+app/*/dist/
+resources/
 
 .cdsrc-private.json
 default-*.json
@@ -20,3 +21,5 @@ mta_archives/
 @cds-models
 
 .claude
+.mtar
+.md
