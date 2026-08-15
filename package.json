@@ -35,6 +35,9 @@
     "app/ui5-reasignacion"
   ],
   "cds": {
+    "historial": {
+      "origen": "cpi"
+    },
     "requires": {
       "auth": "dummy",
       "destinations": true,

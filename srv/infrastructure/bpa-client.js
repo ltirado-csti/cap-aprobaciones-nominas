@@ -143,7 +143,13 @@ async function obtenerTarea(taskId) {
  *   GET /v1/task-instances/{taskId}/context
  *
  * Retorna el objeto contexto del BPA con la PropuestaNomina anidada según el
- * proceso (startEvent.propuesta o startEvent.body — ver perfiles.PROCESOS).
+ * proceso (startEvent.propuesta o startEvent.body — ver perfiles.ROLES_BPA).
+ *
+ * Incluye también la rama `custom` — las variables personalizadas de la
+ * instancia—, que es de donde salen el resultado de la notificación a Payroll y
+ * el estado del quórum de apoderados. Por eso NO hace falta un método aparte
+ * contra /workflow-instances/{id}/context: el contexto de la tarea ya trae el
+ * de su instancia, y este endpoint no necesita resolver ningún processInstanceId.
  *
  * @param {string} taskId - ID de la tarea BPA (campo "id" del TaskInstance)
  * @returns {Promise<object|null>} Contexto de la tarea o null si falla
@@ -175,11 +181,18 @@ async function readContext(taskId) {
  * Endpoint verificado en SPA_Workflow_Runtime.json:
  *   PATCH /v1/task-instances/{taskId}
  *
+ * El `status` de la respuesta de BPA se PROPAGA al llamador. Es lo que permite
+ * distinguir un fallo técnico de la carrera entre dos apoderados del pool: con
+ * el quórum de v1.2.0 la tarea es una sola y el primero que la completa la cierra
+ * para el resto, así que el segundo recibe 404/409 de BPA. Eso no es un error de
+ * sistema, es un mensaje de negocio ("otro apoderado se te adelantó") y la capa
+ * de dominio necesita el código para decirlo así. Ver aprobacion.service.js.
+ *
  * @param {string} taskId            - ID de la user task BPA
  * @param {object} opciones
  * @param {string} opciones.decision - ID de decision del formulario BPA
  * @param {object} opciones.contexto - Contexto a escribir al completar
- * @returns {Promise<{ success: boolean, mensaje: string }>}
+ * @returns {Promise<{ success: boolean, mensaje: string, status: number|null }>}
  */
 async function completarTarea(taskId, { decision, contexto }) {
   const svc = await getSvc();
@@ -191,19 +204,42 @@ async function completarTarea(taskId, { decision, contexto }) {
     });
 
     LOG.info(`completarTarea OK | taskId=${taskId} decision=${decision}`);
-    return { success: true, mensaje: "Tarea completada correctamente" };
+    return { success: true, mensaje: "Tarea completada correctamente", status: 200 };
   } catch (error) {
-    LOG.error(`completarTarea ERROR | taskId=${taskId}`, error.message);
-    return { success: false, mensaje: error.message };
+    const status = _codigoHttp(error);
+    LOG.error(`completarTarea ERROR | taskId=${taskId} status=${status ?? "?"}`, error.message);
+    return { success: false, mensaje: error.message, status };
   }
+}
+
+/**
+ * Extrae el código HTTP de un error de un servicio remoto de CAP.
+ *
+ * No hay una sola propiedad fiable: según por dónde falle, el código llega en
+ * `status`, en `code` (a veces como texto) o en la respuesta cruda. Se prueban
+ * las tres en vez de asumir una, y se devuelve null si ninguna trae un número —
+ * mejor "no se sabe" que un 0 que el llamador interpretaría como código real.
+ */
+function _codigoHttp(error) {
+  const candidatos = [error?.status, error?.statusCode, error?.response?.status, error?.code];
+  for (const candidato of candidatos) {
+    const numero = Number(candidato);
+    if (Number.isInteger(numero) && numero >= 100 && numero < 600) return numero;
+  }
+  return null;
 }
 
 // ─── REASIGNAR TAREA A OTRO USUARIO ───────────────────────────────────────────
 
 /**
- * Reemplaza el destinatario (recipientUsers) de una tarea BPA por otro
- * usuario. Usada por la app de reasignación cuando el destinatario original
- * (Apoderado1, Apoderado2 o Liberador Final) no está disponible.
+ * Reemplaza los destinatarios (recipientUsers) de una tarea BPA. Usada por la
+ * app de reasignación cuando un destinatario original no está disponible.
+ *
+ * ADMITE VARIOS DESTINATARIOS, y eso no es un extra: desde el quórum de v1.2.0
+ * la tarea de apoderado es una sola con un POOL de N destinatarios. Reasignar
+ * enviando un único correo la dejaría con un solo destinatario y expulsaría del
+ * flujo a los apoderados que no habían firmado todavía. Quien llama compone la
+ * lista completa ya sustituida; aquí solo se serializa.
  *
  * IMPORTANTE: requiere que la IDENTIDAD detrás del destino BPA_WORKFLOW
  * (el role collection se asigna a esa identidad, no al destino) tenga el
@@ -214,25 +250,35 @@ async function completarTarea(taskId, { decision, contexto }) {
  *
  * Endpoint verificado: PATCH /public/workflow/rest/v1/task-instances/{taskInstanceId}
  *
- * @param {string} taskId       - ID de la tarea BPA
- * @param {string} nuevoUsuario - email del nuevo destinatario
- * @returns {Promise<{ success: boolean, mensaje: string }>}
+ * @param {string} taskId              - ID de la tarea BPA
+ * @param {string|string[]} destinatarios - correo, CSV o array de correos
+ * @returns {Promise<{ success: boolean, mensaje: string, status: number|null }>}
  */
-async function reasignarTarea(taskId, nuevoUsuario) {
+async function reasignarTarea(taskId, destinatarios) {
   const svc = await getSvc();
+
+  // recipientUsers es un string simple en el schema de BPA, NO un array
+  // — enviarlo como array dispara "Unable to parse the request content
+  // because it has an unexpected format or structure". Varios destinatarios
+  // van en ese mismo string separados por coma, igual que hace el binding de
+  // BPA con context.custom.apoderadospendientes.
+  const lista = (Array.isArray(destinatarios) ? destinatarios : [destinatarios])
+    .flatMap(entrada => String(entrada ?? "").split(","))
+    .map(correo => correo.trim())
+    .filter(Boolean)
+    .join(",");
+
   try {
-    // recipientUsers es un string simple en el schema de BPA, NO un array
-    // — enviarlo como array dispara "Unable to parse the request content
-    // because it has an unexpected format or structure".
     await svc.patch(`/task-instances/${taskId}`, {
-      recipientUsers: nuevoUsuario,
+      recipientUsers: lista,
     });
 
-    LOG.info(`reasignarTarea OK | taskId=${taskId} nuevoUsuario=${nuevoUsuario}`);
-    return { success: true, mensaje: "Tarea reasignada correctamente" };
+    LOG.info(`reasignarTarea OK | taskId=${taskId} destinatarios=${lista}`);
+    return { success: true, mensaje: "Tarea reasignada correctamente", status: 200 };
   } catch (error) {
-    LOG.error(`reasignarTarea ERROR | taskId=${taskId}`, error.message);
-    return { success: false, mensaje: error.message };
+    const status = _codigoHttp(error);
+    LOG.error(`reasignarTarea ERROR | taskId=${taskId} status=${status ?? "?"}`, error.message);
+    return { success: false, mensaje: error.message, status };
   }
 }
 

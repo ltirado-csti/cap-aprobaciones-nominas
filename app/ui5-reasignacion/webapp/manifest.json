@@ -50,13 +50,26 @@
   },
   "sap.ui5": {
     "flexEnabled": true,
+    "extends": {
+      "extensions": {
+        "sap.ui.controllerExtensions": {
+          "sap.fe.templates.ListReport.ListReportController": {
+            "controllerName": "centria.h2hpp.aprobaciones.ui5reasignacion.ext.controller.ListaHandler"
+          },
+          "sap.fe.templates.ObjectPage.ObjectPageController": {
+            "controllerName": "centria.h2hpp.aprobaciones.ui5reasignacion.ext.controller.DetalleHandler"
+          }
+        }
+      }
+    },
     "dependencies": {
       "minUI5Version": "1.148.1",
       "libs": {
         "sap.m": {},
         "sap.f": {},
         "sap.ui.core": {},
-        "sap.fe.templates": {}
+        "sap.fe.templates": {},
+        "sap.suite.ui.commons": {}
       }
     },
     "contentDensities": {
@@ -101,35 +114,94 @@
       "routes": [
         {
           "pattern": ":?query:",
-          "name": "TareasEnCursoList",
-          "target": "TareasEnCursoList"
+          "name": "PropuestasEnCursoList",
+          "target": "PropuestasEnCursoList"
+        },
+        {
+          "pattern": "PropuestasEnCurso({key}):?query:",
+          "name": "PropuestasEnCursoObjectPage",
+          "target": [
+            "PropuestasEnCursoList",
+            "PropuestasEnCursoObjectPage"
+          ]
         }
       ],
       "targets": {
-        "TareasEnCursoList": {
+        "PropuestasEnCursoList": {
           "type": "Component",
-          "id": "TareasEnCursoList",
+          "id": "PropuestasEnCursoList",
           "name": "sap.fe.templates.ListReport",
           "controlAggregation": "beginColumnPages",
           "contextPattern": "",
           "options": {
             "settings": {
-              "entitySet": "TareasEnCurso",
+              "entitySet": "PropuestasEnCurso",
               "variantManagement": "None",
               "initialLoad": true,
+              "navigation": {
+                "PropuestasEnCurso": {
+                  "detail": {
+                    "route": "PropuestasEnCursoObjectPage"
+                  }
+                }
+              },
               "controlConfiguration": {
                 "@com.sap.vocabularies.UI.v1.LineItem": {
                   "tableSettings": {
                     "type": "ResponsiveTable",
                     "selectionMode": "None",
                     "enableExport": true,
-                    "enableFullScreen": false
+                    "enableFullScreen": false,
+                    "personalization": false
                   },
                   "columns": {
-                    "rolTarea": { "width": "9rem" },
-                    "usuarioActual": { "width": "16rem" },
-                    "importe": { "width": "8rem" },
-                    "estadoTarea": { "width": "7rem" }
+                    "grupoPropuesta": { "width": "16rem" },
+                    "estadoPropuesta": { "width": "14rem" },
+                    "destinatarios": { "width": "18rem" },
+                    "importeTexto": { "width": "10rem" },
+                    "banco": { "width": "7rem" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "PropuestasEnCursoObjectPage": {
+          "type": "Component",
+          "id": "PropuestasEnCursoObjectPage",
+          "name": "sap.fe.templates.ObjectPage",
+          "controlAggregation": "midColumnPages",
+          "contextPattern": "PropuestasEnCurso({key})",
+          "options": {
+            "settings": {
+              "entitySet": "PropuestasEnCurso",
+              "editableHeaderContent": false,
+              "controlConfiguration": {
+                "firmantes/@com.sap.vocabularies.UI.v1.LineItem": {
+                  "tableSettings": {
+                    "type": "ResponsiveTable",
+                    "selectionMode": "None",
+                    "personalization": false
+                  },
+                  "columns": {
+                    "rol": { "width": "8rem" },
+                    "usuario": { "width": "14rem" },
+                    "estadoFirmante": { "width": "8rem" },
+                    "motivoNoReasignable": { "width": "18rem" }
+                  }
+                }
+              },
+              "content": {
+                "body": {
+                  "sections": {
+                    "FlujoAprobacion": {
+                      "template": "centria.h2hpp.aprobaciones.ui5reasignacion.ext.fragment.FlujoProcessFlow",
+                      "title": "{i18n>flujoSeccionTitulo}",
+                      "position": {
+                        "placement": "After",
+                        "anchor": "Firmantes"
+                      }
+                    }
                   }
                 }
               }

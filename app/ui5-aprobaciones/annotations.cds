@@ -22,10 +22,19 @@ annotate PagosService.TareasInbox with @(
         Description   : { Value: numeroPropuesta },
     },
 
+    // ── Filtros de la barra de filtros ────────────────────────────────────────
+    // Solo estos cuatro: el botón "Adaptar filtros" está oculto (ver
+    // ext/controller/ListaHandler.controller.js), así que esta lista es
+    // literalmente lo único con lo que el usuario puede filtrar.
+    //
+    // El filtrado lo resuelve CAP en memoria — TareasInbox no tiene tabla
+    // detrás y BPA no sabe filtrar por estos campos. Ver
+    // srv/infrastructure/odata-memoria.js.
     UI.SelectionFields: [
         sociedad,
         banco,
         fechaPropuestaPago,
+        estadoPP,
     ],
 
     // ── Columnas del List Report ──────────────────────────────────────────────
@@ -33,11 +42,15 @@ annotate PagosService.TareasInbox with @(
         { $Type: 'UI.DataField', Value: tituloTarea,        Label: 'Propuesta',  ![@UI.Importance]: #High },
         { $Type: 'UI.DataField', Value: estadoPP,           Label: 'Estado',     ![@UI.Importance]: #High,
           Criticality: estadoCriticidad, CriticalityRepresentation: #WithIcon },
-        { $Type: 'UI.DataField', Value: importe,            Label: 'Importe',    ![@UI.Importance]: #High },
-        { $Type: 'UI.DataField', Value: moneda,             Label: 'Moneda',     ![@UI.Importance]: #High },
+        // Importe ya formateado por CAP con la convención peruana: "S/ 43,038.69".
+        // La columna 'Moneda' se retiró porque el símbolo va dentro del importe y
+        // mostrar además "PEN" era información duplicada. El campo `moneda` sigue
+        // en el modelo para cálculos y para otros consumidores del servicio.
+        { $Type: 'UI.DataField', Value: importeTexto,       Label: 'Importe',    ![@UI.Importance]: #High },
         // { $Type: 'UI.DataField', Value: banco,           Label: 'Banco',      ![@UI.Importance]: #High },
         // { $Type: 'UI.DataField', Value: viaPago,         Label: 'Vía Pago',   ![@UI.Importance]: #High },
         { $Type: 'UI.DataField', Value: fechaPropuestaPago, Label: 'Fecha PP',   ![@UI.Importance]: #High },
+        { $Type: 'UI.DataField', Value: fechaPago,          Label: 'Fecha Pago', ![@UI.Importance]: #High },
         // { $Type: 'UI.DataField', Value: analista,        Label: 'Analista',   ![@UI.Importance]: #High },
 
         // Rechazo de Payroll del intento anterior. Vacío en el caso normal; con
@@ -46,6 +59,15 @@ annotate PagosService.TareasInbox with @(
         // antes que las columnas críticas en pantallas angostas.
         { $Type: 'UI.DataField', Value: notifMensaje, Label: 'Rechazo Payroll', ![@UI.Importance]: #Medium,
           Criticality: notifCriticidad, CriticalityRepresentation: #WithIcon },
+
+        // Estado del quórum de apoderados — "1 de 2 firmas".
+        //
+        // Desde BPA v1.2.0 una propuesta puede reaparecer en la bandeja porque
+        // falta la segunda firma, no solo porque Payroll rechazó. Sin esta
+        // columna las dos situaciones son indistinguibles en la lista, y el
+        // apoderado no sabe si su firma es la que cierra el paso o no.
+        // Vacío en las tareas de liberación, que no tienen quórum.
+        { $Type: 'UI.DataField', Value: firmasTexto, Label: 'Firmas', ![@UI.Importance]: #Medium },
 
         // Acción masiva de la toolbar del List Report — reusa la bound action
         // apoderadoAprobar(). FE la invoca una vez por contexto seleccionado en
@@ -56,9 +78,9 @@ annotate PagosService.TareasInbox with @(
         // Necesario en $select para que la columna de rechazo pinte su color
         { $Type: 'UI.DataField', Value: notifCriticidad, ![@UI.Hidden]: true },
 
-        // Flags de rol — ocultos, necesarios en $select para visibilidad de botones en Object Page
-        { $Type: 'UI.DataField', Value: esApoderado1,  ![@UI.Hidden]: true },
-        { $Type: 'UI.DataField', Value: esApoderado2,  ![@UI.Hidden]: true },
+        // Flags de rol — ocultos, necesarios en $select para visibilidad de botones en Object Page.
+        // esApoderado1/esApoderado2 se retiraron con el quórum de BPA v1.2.0:
+        // ya no hay dos tareas de apoderado, sino una con pool de destinatarios.
         { $Type: 'UI.DataField', Value: esApoderado,   ![@UI.Hidden]: true },
         { $Type: 'UI.DataField', Value: esLiberador,   ![@UI.Hidden]: true },
         { $Type: 'UI.DataField', Value: esCoordinador, ![@UI.Hidden]: true },
@@ -109,9 +131,15 @@ annotate PagosService.TareasInbox with @(
             // (color + ícono automático) en vez de texto plano.
             { $Type: 'UI.DataField', Value: estadoPP, Label: 'Estado',
               Criticality: estadoCriticidad, CriticalityRepresentation: #WithIcon },
-            { $Type: 'UI.DataField', Value: importe,           Label: 'Importe' },
-            { $Type: 'UI.DataField', Value: moneda,            Label: 'Moneda' },
+            { $Type: 'UI.DataField', Value: importeTexto,      Label: 'Importe' },
             { $Type: 'UI.DataField', Value: fechaPropuestaPago,Label: 'Fecha PP' },
+            { $Type: 'UI.DataField', Value: fechaPago,         Label: 'Fecha Pago' },
+
+            // Quórum de apoderados — "1 de 2 firmas". Solo se muestra en las
+            // tareas de apoderado: en las de liberación firmasTexto llega vacío
+            // y el DataField desaparece por sí solo.
+            { $Type: 'UI.DataField', Value: firmasTexto, Label: 'Firmas',
+              ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esApoderado' }] } } },
 
             // Motivo por el que Payroll rechazó el intento anterior. Solo aparece
             // cuando notifTieneError = true: si la tarea volvió al inbox por el loop
@@ -129,6 +157,10 @@ annotate PagosService.TareasInbox with @(
             { $Type: 'UI.DataField', Value: estadoCriticidad, ![@UI.Hidden]: true },
             { $Type: 'UI.DataField', Value: notifTieneError,  ![@UI.Hidden]: true },
             { $Type: 'UI.DataField', Value: notifCriticidad,  ![@UI.Hidden]: true },
+            // esApoderado gobierna el ![@UI.Hidden] de "Firmas" en este mismo
+            // grupo: sin declararlo aquí el $select podría no traerlo y la
+            // expresión evaluaría contra undefined, ocultándolo siempre.
+            { $Type: 'UI.DataField', Value: esApoderado,      ![@UI.Hidden]: true },
         ],
     },
 
@@ -140,7 +172,17 @@ annotate PagosService.TareasInbox with @(
         // para volver a mostrar las secciones en el Object Page.
         // { $Type: 'UI.ReferenceFacet', ID: 'Proveedores', Label: 'Proveedores', Target: 'proveedores/@UI.LineItem' },
         // { $Type: 'UI.ReferenceFacet', ID: 'Adjuntos',    Label: 'Adjuntos',    Target: 'adjuntos/@UI.LineItem' },
-        { $Type: 'UI.ReferenceFacet', ID: 'Aprobadores',    Label: 'Historial de Aprobaciones',Target: 'aprobadores/@UI.LineItem' },
+
+        // "Historial de Aprobaciones" YA NO SE DECLARA AQUÍ.
+        // Dejó de ser una tabla para pasar a ser un diagrama de flujo
+        // (sap.suite.ui.commons.ProcessFlow), que Fiori Elements no sabe generar
+        // desde anotaciones. Se declara como sección personalizada en
+        // manifest.json → TareasInboxObjectPage > settings > content > body >
+        // sections > HistorialAprobaciones, anclada después de 'DatosGenerales',
+        // y su plantilla vive en ext/fragment/HistorialProcessFlow.fragment.xml.
+        //
+        // Por eso el ID 'DatosGenerales' de la faceta anterior es significativo:
+        // el manifest lo usa como ancla de posición. No renombrarlo.
     ],
 
     UI.FieldGroup#DatosGenerales: {
@@ -151,10 +193,16 @@ annotate PagosService.TareasInbox with @(
             { $Type: 'UI.DataField',        Value: version,               Label: 'Versión' },
             { $Type: 'UI.DataField',        Value: modalidadPP,           Label: 'Modalidad' },
             { $Type: 'UI.DataField',        Value: banco,                 Label: 'Banco' },
-            { $Type: 'UI.DataField',        Value: viaPago,               Label: 'Vía Pago' },
-            { $Type: 'UI.DataField',        Value: indicadorPagoAdelanto, Label: 'Ind. Adelanto' },
             { $Type: 'UI.DataField',        Value: existeDocumento,       Label: 'Existe Documento' },
             { $Type: 'UI.DataField',        Value: contadorFirma,         Label: 'N° Firmas' },
+
+            // Quórum de apoderados. La lista completa contesta "¿quién más
+            // puede firmar esto?", que es la pregunta que se hace el apoderado
+            // al ver una propuesta que sigue pendiente después de su firma.
+            { $Type: 'UI.DataField',        Value: usuariosApoderados,    Label: 'Apoderados habilitados' },
+            { $Type: 'UI.DataField',        Value: apoderadosFirmantes,   Label: 'Ya firmaron' },
+            { $Type: 'UI.DataField',        Value: apoderadosPendientes,  Label: 'Firmas pendientes de' },
+
             { $Type: 'UI.DataField',        Value: analista,              Label: 'Analista' },
             { $Type: 'UI.DataField',        Value: usuarioCreacion,       Label: 'Creado por' },
             { $Type: 'UI.DataFieldWithUrl', Value: urlPDF, Url: urlPDF,  Label: 'PDF' },
@@ -166,6 +214,75 @@ annotate PagosService.TareasInbox with @(
         ],
     },
 );
+
+// =============================================================================
+// Etiquetas de los campos de la barra de filtros
+//
+// Bloque aparte porque anota ELEMENTOS (annotate ... with { campo @anno })
+// y no la entidad: no cabe dentro del `with @( ... )` de arriba. La nota de
+// cabecera sobre mantener un único bloque se refiere a las anotaciones @UI de
+// la entidad, que son las que el PropertyHelper de MDC mergea; los @Common.Label
+// por elemento no entran en ese merge.
+//
+// Sin esto la barra de filtros muestra el nombre técnico del campo como
+// etiqueta ("fechaPropuestaPago:").
+// =============================================================================
+annotate PagosService.TareasInbox with {
+    sociedad           @Common.Label: 'Sociedad';
+    banco              @Common.Label: 'Banco';
+    fechaPropuestaPago @Common.Label: 'Fecha PP';
+    fechaPago          @Common.Label: 'Fecha Pago';
+
+    // Estado: desplegable de valores fijos en vez de texto libre.
+    //
+    // ValueListWithFixedValues hace que Fiori Elements renderice un
+    // MultiComboBox directamente en la barra de filtros, en lugar del diálogo
+    // de ayuda de valores. Con seis opciones es lo correcto — y sobre todo
+    // evita el problema real del texto libre: estadoPP se compara como cadena,
+    // así que escribir "Pendiente de Liberacion" sin tilde no devolvía nada.
+    //
+    // LocalDataProperty y ValueListProperty son ambos estadoPP porque la lista
+    // de valores no tiene código: la clave ES el texto (ver EstadosPropuesta
+    // en srv/pagos-service.cds).
+    estadoPP @(
+        Common.Label                   : 'Estado',
+        Common.ValueListWithFixedValues: true,
+        Common.ValueList               : {
+            $Type         : 'Common.ValueListType',
+            CollectionPath: 'EstadosPropuesta',
+            Parameters    : [
+                { $Type            : 'Common.ValueListParameterInOut',
+                  LocalDataProperty: estadoPP,
+                  ValueListProperty: 'estadoPP' }
+            ]
+        }
+    );
+};
+
+// =============================================================================
+// EstadosPropuesta — lista de valores del filtro "Estado"
+//
+// El MultiComboBox de valores fijos solo pinta texto: es un control de entrada,
+// no una tabla, así que no aplica Criticality. El color semántico de cada estado
+// se ve donde hay un DataField que lo represente — la columna "Estado" de la
+// lista y la cabecera del Object Page — y sale de la misma criticidad que se
+// declara aquí (config/estados.js alimenta las dos cosas).
+//
+// El UI.LineItem no es decorativo: es lo que dibujaría las columnas si algún día
+// se quita ValueListWithFixedValues y la ayuda pasa a ser un diálogo con tabla.
+// Ahí sí se veria el estado con su color.
+// =============================================================================
+annotate PagosService.EstadosPropuesta with @(
+    UI.LineItem: [
+        { $Type: 'UI.DataField', Value: estadoPP, Label: 'Estado',
+          Criticality: criticidad, CriticalityRepresentation: #WithIcon },
+    ],
+);
+
+annotate PagosService.EstadosPropuesta with {
+    estadoPP   @Common.Label: 'Estado';
+    criticidad @UI.Hidden;
+};
 
 // =============================================================================
 // Disponibilidad de acciones bound (controla si el botón está habilitado)
@@ -225,14 +342,21 @@ annotate PagosService.Adjunto with @(
 
 // =============================================================================
 // Aprobador
+//
+// El Object Page NO consume este LineItem: el historial se muestra como
+// ProcessFlow en una sección personalizada (ver UI.Facets más arriba). Se
+// conserva porque sigue siendo la vista tabular del mismo dato — útil para
+// depurar el iFlow y disponible si negocio pide recuperar la tabla junto al
+// diagrama: basta con volver a añadir la ReferenceFacet a 'aprobadores'.
 // =============================================================================
 annotate PagosService.Aprobador with @(
     UI.LineItem: [
-        { $Type: 'UI.DataField', Value: orden,       Label: '#' },
-        { $Type: 'UI.DataField', Value: usuario,     Label: 'Usuario' },
-        { $Type: 'UI.DataField', Value: rol,         Label: 'Rol' },
-        { $Type: 'UI.DataField', Value: decision,    Label: 'Decisión' },
-        { $Type: 'UI.DataField', Value: comentario,  Label: 'Comentario' },
-        { $Type: 'UI.DataField', Value: fechaAccion, Label: 'Fecha' },
+        { $Type: 'UI.DataField', Value: nivel,         Label: 'Nivel' },
+        { $Type: 'UI.DataField', Value: nombre,        Label: 'Aprobador' },
+        { $Type: 'UI.DataField', Value: cargo,         Label: 'Cargo' },
+        { $Type: 'UI.DataField', Value: usuario,       Label: 'Usuario' },
+        { $Type: 'UI.DataField', Value: decisionTexto, Label: 'Decisión' },
+        { $Type: 'UI.DataField', Value: comentario,    Label: 'Comentario' },
+        { $Type: 'UI.DataField', Value: fechaTexto,    Label: 'Fecha' },
     ],
 );

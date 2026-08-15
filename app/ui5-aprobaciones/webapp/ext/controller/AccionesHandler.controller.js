@@ -13,6 +13,7 @@
  */
 sap.ui.define([
     "sap/ui/core/mvc/ControllerExtension",
+    "sap/ui/core/Component",
     "sap/m/MessageBox",
     "sap/m/Dialog",
     "sap/m/Button",
@@ -21,6 +22,7 @@ sap.ui.define([
     "sap/m/VBox"
 ], function (
     ControllerExtension,
+    Component,
     MessageBox,
     Dialog,
     Button,
@@ -296,13 +298,60 @@ sap.ui.define([
 
             // ─── NAVEGACION ──────────────────────────────────────────────────
 
+            /**
+             * Vuelve a la lista cerrando la columna del Object Page (FCL).
+             *
+             * Implementacion anterior y por que fallaba:
+             *   getView().getController().getOwnerComponent().getRouter()
+             *   En sap.fe el componente propietario de la vista es el component
+             *   del TEMPLATE (sap.fe.templates.ObjectPage.Component), que NO tiene
+             *   router propio: getRouter() devuelve undefined y el .navTo() lanza
+             *   TypeError. El catch caia entonces en window.history.back(), que si
+             *   la app se abrio directamente (Launchpad o pestaña nueva) NO vuelve
+             *   a la lista: SACA AL USUARIO DEL APLICATIVO.
+             *
+             * Ahora se usa la via soportada por sap.fe —ExtensionAPI.getRouting()—
+             * con un respaldo que sube por la jerarquia de componentes hasta
+             * encontrar uno con router. Y sobre todo: nunca history.back().
+             */
             _navegarALista: function () {
+                var RUTA_LISTA = "TareasInboxList";
+
+                // 1) Via oficial de sap.fe (PageController.getExtensionAPI)
                 try {
-                    this.getView().getController().getOwnerComponent()
-                        .getRouter().navTo("TareasInboxList");
+                    var oExtensionAPI = this.base && this.base.getExtensionAPI && this.base.getExtensionAPI();
+                    var oRouting      = oExtensionAPI && oExtensionAPI.getRouting && oExtensionAPI.getRouting();
+                    if (oRouting && oRouting.navigateToRoute) {
+                        oRouting.navigateToRoute(RUTA_LISTA).catch(function (oError) {
+                            console.error("[AccionesHandler] navigateToRoute fallo", oError);
+                        });
+                        return;
+                    }
                 } catch (e) {
-                    window.history.back();
+                    console.warn("[AccionesHandler] ExtensionAPI no disponible", e);
                 }
+
+                // 2) Respaldo: buscar hacia arriba el componente que si tiene router
+                try {
+                    var oComponente = Component.getOwnerComponentFor(this.getView());
+                    var oRouter;
+                    while (oComponente) {
+                        if (typeof oComponente.getRouter === "function") {
+                            oRouter = oComponente.getRouter();
+                            if (oRouter && typeof oRouter.navTo === "function") {
+                                oRouter.navTo(RUTA_LISTA);
+                                return;
+                            }
+                        }
+                        oComponente = Component.getOwnerComponentFor(oComponente);
+                    }
+                } catch (e) {
+                    console.warn("[AccionesHandler] respaldo de router fallo", e);
+                }
+
+                // 3) Sin salida valida: dejar la pagina abierta. Es preferible que
+                //    el usuario cierre la columna a mano antes que expulsarlo.
+                console.warn("[AccionesHandler] no se pudo volver a la lista; se deja el Object Page abierto");
             },
 
             // ─── HANDLERS PUBLICOS ────────────────────────────────────────────

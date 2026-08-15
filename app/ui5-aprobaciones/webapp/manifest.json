@@ -55,6 +55,9 @@
         "sap.ui.controllerExtensions": {
           "sap.fe.templates.ObjectPage.ObjectPageController": {
             "controllerName": "centria.h2hpp.aprobaciones.ui5aprobaciones.ext.controller.AccionesHandler"
+          },
+          "sap.fe.templates.ListReport.ListReportController": {
+            "controllerName": "centria.h2hpp.aprobaciones.ui5aprobaciones.ext.controller.ListaHandler"
           }
         }
       }
@@ -65,7 +68,8 @@
         "sap.m": {},
         "sap.f": {},
         "sap.ui.core": {},
-        "sap.fe.templates": {}
+        "sap.fe.templates": {},
+        "sap.suite.ui.commons": {}
       }
     },
     "contentDensities": {
@@ -135,7 +139,6 @@
               "entitySet": "TareasInbox",
               "variantManagement": "None",
               "initialLoad": true,
-              "hideFilterBar": true,
               "navigation": {
                 "TareasInbox": {
                   "detail": {
@@ -149,7 +152,11 @@
                     "type": "ResponsiveTable",
                     "selectionMode": "Multi",
                     "enableExport": true,
-                    "enableFullScreen": false
+                    "enableFullScreen": false,
+                    "personalization": false,
+                    "columns": {
+                      "importeTexto": { "width": "7rem" }
+                    }
                   }
                 }
               }
@@ -176,10 +183,19 @@
                   "tableSettings": {
                     "type": "ResponsiveTable"
                   }
-                },
-                "aprobadores/@com.sap.vocabularies.UI.v1.LineItem": {
-                  "tableSettings": {
-                    "type": "ResponsiveTable"
+                }
+              },
+              "content": {
+                "body": {
+                  "sections": {
+                    "HistorialAprobaciones": {
+                      "template": "centria.h2hpp.aprobaciones.ui5aprobaciones.ext.fragment.HistorialProcessFlow",
+                      "title": "{i18n>historialSeccionTitulo}",
+                      "position": {
+                        "placement": "After",
+                        "anchor": "DatosGenerales"
+                      }
+                    }
                   }
                 }
               }

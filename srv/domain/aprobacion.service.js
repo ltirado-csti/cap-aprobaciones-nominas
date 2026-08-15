@@ -4,11 +4,28 @@
  *
  * Handlers de las acciones bound de TareasInbox (aprobación de nómina).
  *
- * Roles activos BPA v1.1.5:
- *   Apoderado1 / Apoderado2: aprobar | observar   (contexto: startEvent.body)
- *   Liberador:               liberar | rechazar | anular  (contexto: startEvent.propuesta)
+ * Roles activos BPA v1.2.0 (H2H Nomina 1.4.0):
+ *   Apoderado: aprobar | observar          (contexto: startEvent.body)
+ *   Liberador: liberar | rechazar | anular (contexto: startEvent.propuesta)
  *
  * Coordinador: ANULADO en BPA v1.1.0 — acciones conservadas, nunca invocadas en producción.
+ *
+ * ── QUÓRUM DE APODERADOS ─────────────────────────────────────────────────────
+ *
+ * La tarea de apoderado es UNA SOLA con un pool de destinatarios: aparece en el
+ * inbox de todos los apoderados pendientes y basta con que dos cualesquiera
+ * aprueben. Eso obliga a este módulo a hacer dos cosas que antes no hacían falta:
+ *
+ *   1. Enviar el EMAIL DEL FIRMANTE en el payload de completarTarea. Con un pool,
+ *      BPA no expone de forma fiable quién completó la tarea, y sin ese dato el
+ *      script `Registrar firma` no incrementa el contador: bucle infinito. El
+ *      correo sale SIEMPRE de req.user.id (XSUAA) — nunca del cliente.
+ *   2. Verificar que el firmante sigue en el pool de pendientes antes de
+ *      completar. BPA ya lo excluye de los destinatarios al firmar, pero la
+ *      acción es invocable directamente contra el servicio OData.
+ *
+ * Además, dos apoderados pueden decidir a la vez: el primero cierra la tarea y
+ * el segundo recibe 404/409 de BPA. Eso es un mensaje de negocio, no un 502.
  *
  * Principio anti-tampering (CRÍTICO):
  *   - instanceID  → siempre de req.params    (nunca del body del cliente)
@@ -41,6 +58,7 @@ const LOG = cds.log("aprobacion-service");
  * @param {string} decision - decisión BPA a aplicar (ej: "aprobar", "liberar")
  * @returns {Promise<{
  *   instanceID  : string,
+ *   contexto    : object,
  *   propuesta   : import('./config/perfiles').PropuestaNomina,
  *   usuario     : string,
  *   comentario  : string,
@@ -81,11 +99,15 @@ async function _prepararAccion(req, decision) {
         return req.reject(400, `La decisión "${decision}" no es válida para este rol`);
     }
 
-    // 5. Leer el contexto de la propuesta desde BPA (ruta según el rol)
+    // 5. Leer el contexto de la propuesta desde BPA (ruta según el rol).
+    //    Se conserva el contexto COMPLETO además de la propuesta: la rama
+    //    `custom` es la que lleva el estado del quórum, y volver a pedirla sería
+    //    una segunda llamada a BPA por el mismo dato.
+    let contexto;
     let propuesta;
     try {
-        const contextoCompleto = await bpaClient.readContext(instanceID);
-        propuesta = _navegarRuta(contextoCompleto, rolBpa.contextPath);
+        contexto  = await bpaClient.readContext(instanceID);
+        propuesta = _navegarRuta(contexto, rolBpa.contextPath);
     } catch (err) {
         LOG.error(`_prepararAccion | leerContexto falló | instanceID=${instanceID}`, err.message);
         return req.reject(502, "No se pudo leer el contexto de la propuesta en BPA");
@@ -98,10 +120,33 @@ async function _prepararAccion(req, decision) {
     // 6. Usuario autenticado desde XSUAA (única fuente de verdad del firmante)
     const usuario = req.user.id;
 
-    // 7. Comentario: único dato aceptado del cliente
+    // 7. Autorización por pertenencia — solo para roles de pool.
+    //
+    //    Con un pool de destinatarios, BPA reparte la tarea entre los apoderados
+    //    PENDIENTES y saca del pool a quien ya firmó. Repetir esa comprobación
+    //    aquí cierra dos puertas: la de un usuario que invoca la acción OData
+    //    directamente sin tener la tarea, y la del apoderado que intenta firmar
+    //    dos veces la misma propuesta (que además rompería el quórum, porque el
+    //    script `Registrar firma` cuenta firmantes distintos).
+    //
+    //    Para el liberador no aplica: su destinatario es uno solo y BPA ya no le
+    //    entregaría la tarea a nadie más.
+    if (rolBpa.esPool && !perfiles.esApoderadoAutorizado(usuario, contexto, propuesta)) {
+        const { pendientes } = perfiles.resolverQuorumApoderados(contexto, propuesta);
+        LOG.warn(
+            `_prepararAccion | firmante fuera del pool | instanceID=${instanceID} ` +
+            `usuario=${usuario} pendientes=${pendientes.join(",") || "(vacío)"}`
+        );
+        return req.reject(403,
+            "Usted no figura entre los apoderados que aún pueden firmar esta propuesta. " +
+            "Si ya firmó, la tarea sigue visible hasta que el segundo apoderado la complete."
+        );
+    }
+
+    // 8. Comentario: único dato aceptado del cliente
     const comentario = (req.data?.comentario ?? "").trim();
 
-    // 8. Calcular flags de rol (para logs y respuesta)
+    // 9. Calcular flags de rol (para logs y respuesta)
     const flags = perfiles.calcularFlagsRol(taskDefId);
 
     LOG.info(
@@ -109,7 +154,7 @@ async function _prepararAccion(req, decision) {
         `rol=${taskDefId} decision=${decision}`
     );
 
-    return { instanceID, propuesta, usuario, comentario, taskDefId, rolBpa, flags };
+    return { instanceID, contexto, propuesta, usuario, comentario, taskDefId, rolBpa, flags };
 }
 
 // =============================================================================
@@ -135,26 +180,79 @@ function _navegarRuta(objeto, ruta) {
 // =============================================================================
 // FUNCIÓN INTERNA: _armarContextoBpa
 // Construye el objeto de contexto que CAP envía a BPA al completar la tarea.
-// BPA v1.1.5 incluye: perfil, comentario, taskInstanceId.
 // =============================================================================
 
 /**
  * Arma el payload de contexto para completar la tarea en BPA.
- * El campo perfil es el literal IpPerfil del iFlow ZhrfApoReg.
  *
- * @param {object} rolBpa     - rol resuelto por resolverRolBpa()
+ * El payload se mapea a la SALIDA DEL FORMULARIO de la user task, así que sus
+ * claves son las del formulario y van en camelCase — la normalización a
+ * minúsculas de BPA afecta solo a context.custom.*, no a los campos del form.
+ *
+ * `emailFirmante` es obligatorio en la tarea de apoderado y es el cambio central
+ * del quórum v1.2.0: con un pool de destinatarios BPA no sabe quién completó la
+ * tarea, y el script `Registrar firma` lo necesita para incrementar el contador
+ * y sacar al firmante de la lista de pendientes. Si llegara vacío, el contador
+ * nunca avanzaría y la tarea entraría en bucle. Sale SIEMPRE de req.user.id.
+ *
+ * Ya NO se envían `perfil` ni `taskInstanceId`:
+ *   · perfil (IpPerfil) lo calcula BPA en tiempo de ejecución — es el slot de
+ *     firma, no un atributo del usuario, así que CAP no puede conocerlo.
+ *   · taskInstanceId era el instanceID de la tarea escrito en un campo del
+ *     DataType que ningún binding del BPMN lee.
+ *
+ * @param {string} usuario    - req.user.id (XSUAA)
  * @param {string} comentario - comentario libre del firmante
- * @param {string} instanceID - ID de la tarea BPA
- * @returns {{ perfil: string, comentario: string, taskInstanceId: string }}
+ * @returns {{ emailFirmante: string, comentario: string }}
  */
-function _armarContextoBpa(rolBpa, comentario, instanceID) {
+function _armarContextoBpa(usuario, comentario) {
     return {
-        perfil        : rolBpa.perfilCPI,
-        comentario    : comentario,
-        // PENDIENTE: confirmar con el arquitecto si es ID de tarea o de proceso.
-        // Actualmente se usa el instanceID de la tarea BPA.
-        taskInstanceId: instanceID,
+        emailFirmante: String(usuario ?? "").trim().toLowerCase(),
+        comentario   : comentario,
     };
+}
+
+// =============================================================================
+// FUNCIÓN INTERNA: _completar
+// Envía la decisión a BPA y traduce el fallo al lenguaje del usuario.
+// =============================================================================
+
+/**
+ * Completa la tarea en BPA y convierte un fallo en el error CAP que corresponda.
+ *
+ * Antes el resultado de completarTarea se descartaba y todas las acciones
+ * respondían "enviado" aunque BPA hubiera rechazado el PATCH. Con el pool de
+ * apoderados eso deja de ser un descuido tolerable: dos personas pueden decidir
+ * sobre la MISMA tarea a la vez y la segunda tiene que enterarse de que llegó
+ * tarde, no recibir una confirmación falsa.
+ *
+ * 404/409/410 → la tarea ya no está disponible: mensaje de negocio (400), no un
+ * fallo de sistema. Cualquier otro código es un problema técnico → 502.
+ *
+ * @param {import('@sap/cds').Request} req
+ * @param {string} instanceID
+ * @param {string} decision
+ * @param {object} contexto - payload de _armarContextoBpa
+ */
+async function _completar(req, instanceID, decision, contexto) {
+    const resultado = await bpaClient.completarTarea(instanceID, { decision, contexto });
+    if (resultado.success) return;
+
+    const yaNoDisponible = [404, 409, 410].includes(resultado.status);
+
+    LOG.error(
+        `_completar ERROR | instanceID=${instanceID} decision=${decision} ` +
+        `status=${resultado.status ?? "?"} | ${resultado.mensaje}`
+    );
+
+    if (yaNoDisponible) {
+        return req.reject(400,
+            "Esta tarea ya fue completada por otro aprobador. " +
+            "Actualice la bandeja para ver el estado actual de la propuesta."
+        );
+    }
+
+    return req.reject(502, `No se pudo registrar la decisión en BPA: ${resultado.mensaje}`);
 }
 
 // =============================================================================
@@ -204,53 +302,47 @@ function _responder(req, accion) {
 function registrarHandlers(srv) {
 
     // =========================================================================
-    // ACCIONES APODERADO — Apoderado1 y Apoderado2 (mismo handler, rol por tarea)
+    // ACCIONES APODERADO — tarea única con pool y quórum de 2 firmas
     // Contexto BPA: startEvent.body
     // =========================================================================
 
     /**
      * El apoderado aprueba la propuesta de nómina.
-     * BPA ejecuta el ActionTask apoReg que registra la firma en CPI/Payroll.
+     * BPA ejecuta el ActionTask ZhrfApoReg que registra la firma en CPI/Payroll
+     * y, si Payroll acepta, cuenta la firma para el quórum.
      */
     srv.on("apoderadoAprobar", "TareasInbox", async (req) => {
         const accion = await _prepararAccion(req, "aprobar");
 
-        const { instanceID, rolBpa, comentario } = accion;
+        const { instanceID, usuario, comentario } = accion;
 
-        await bpaClient.completarTarea(
-            instanceID,
-            {
-                decision: "aprobar",
-                contexto: _armarContextoBpa(rolBpa, comentario, instanceID),
-            }
-        );
+        await _completar(req, instanceID, "aprobar",
+            _armarContextoBpa(usuario, comentario));
 
-        LOG.info(`apoderadoAprobar OK | instanceID=${instanceID}`);
+        LOG.info(`apoderadoAprobar OK | instanceID=${instanceID} firmante=${usuario}`);
         return _responder(req, "Aprobación enviada");
     });
 
     /**
      * El apoderado observa la propuesta (devuelve con nota al analista).
-     * BPA ejecuta el ActionTask Obs que registra la observación en CPI/Payroll.
+     *
+     * La observación NO entra al quórum: cierra el subproceso de apoderados por
+     * la vía "Notificación de observacion", sin loop back. Una sola observación
+     * basta, no hacen falta dos.
      */
     srv.on("apoderadoObservar", "TareasInbox", async (req) => {
         const accion = await _prepararAccion(req, "observar");
 
-        const { instanceID, rolBpa, comentario } = accion;
+        const { instanceID, usuario, comentario } = accion;
 
         if (!comentario) {
             return req.error(400, "El comentario es obligatorio al observar una propuesta");
         }
 
-        await bpaClient.completarTarea(
-            instanceID,
-            {
-                decision: "observar",
-                contexto: _armarContextoBpa(rolBpa, comentario, instanceID),
-            }
-        );
+        await _completar(req, instanceID, "observar",
+            _armarContextoBpa(usuario, comentario));
 
-        LOG.info(`apoderadoObservar OK | instanceID=${instanceID}`);
+        LOG.info(`apoderadoObservar OK | instanceID=${instanceID} firmante=${usuario}`);
         return _responder(req, "Observación enviada");
     });
 
@@ -266,15 +358,10 @@ function registrarHandlers(srv) {
     srv.on("liberadorLiberar", "TareasInbox", async (req) => {
         const accion = await _prepararAccion(req, "liberar");
 
-        const { instanceID, rolBpa, comentario } = accion;
+        const { instanceID, usuario, comentario } = accion;
 
-        await bpaClient.completarTarea(
-            instanceID,
-            {
-                decision: "liberar",
-                contexto: _armarContextoBpa(rolBpa, comentario, instanceID),
-            }
-        );
+        await _completar(req, instanceID, "liberar",
+            _armarContextoBpa(usuario, comentario));
 
         LOG.info(`liberadorLiberar OK | instanceID=${instanceID}`);
         return _responder(req, "Liberación enviada");
@@ -287,19 +374,14 @@ function registrarHandlers(srv) {
     srv.on("liberadorRechazar", "TareasInbox", async (req) => {
         const accion = await _prepararAccion(req, "rechazar");
 
-        const { instanceID, rolBpa, comentario } = accion;
+        const { instanceID, usuario, comentario } = accion;
 
         if (!comentario) {
             return req.error(400, "El comentario es obligatorio al rechazar una propuesta");
         }
 
-        await bpaClient.completarTarea(
-            instanceID,
-            {
-                decision: "rechazar",
-                contexto: _armarContextoBpa(rolBpa, comentario, instanceID),
-            }
-        );
+        await _completar(req, instanceID, "rechazar",
+            _armarContextoBpa(usuario, comentario));
 
         LOG.info(`liberadorRechazar OK | instanceID=${instanceID}`);
         return _responder(req, "Rechazo enviado");
@@ -312,19 +394,14 @@ function registrarHandlers(srv) {
     srv.on("liberadorAnular", "TareasInbox", async (req) => {
         const accion = await _prepararAccion(req, "anular");
 
-        const { instanceID, rolBpa, comentario } = accion;
+        const { instanceID, usuario, comentario } = accion;
 
         if (!comentario) {
             return req.error(400, "El comentario es obligatorio al anular una propuesta");
         }
 
-        await bpaClient.completarTarea(
-            instanceID,
-            {
-                decision: "anular",
-                contexto: _armarContextoBpa(rolBpa, comentario, instanceID),
-            }
-        );
+        await _completar(req, instanceID, "anular",
+            _armarContextoBpa(usuario, comentario));
 
         LOG.info(`liberadorAnular OK | instanceID=${instanceID}`);
         // La anulación cierra el proceso: no hay loop back posible, así que aquí

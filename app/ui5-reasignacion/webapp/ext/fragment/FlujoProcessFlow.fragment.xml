@@ -1,0 +1,219 @@
+<!--
+    app/ui5-reasignacion/webapp/ext/fragment/FlujoProcessFlow.fragment.xml
+
+    Sección personalizada del Object Page: "Flujo de Aprobación".
+    Se registra en manifest.json bajo
+      sap.ui5 > routing > targets > PropuestasEnCursoObjectPage > options >
+      settings > content > body > sections.
+
+    Portado del fragmento homónimo de ui5-aprobaciones. Se mantienen sus
+    decisiones —y sus comentarios— porque documentan trampas ya resueltas del
+    control; lo único que cambia es de dónde cuelgan los datos y el aviso.
+
+    ── El fragmento NO tiene lógica ─────────────────────────────────────────────
+    Enlaza dos colecciones que CAP ya entrega calculadas
+    (srv/domain/historial.service.js, compartido con la app de aprobaciones):
+      niveles     → lanes  (columnas: Analista → Apoderados → Liberador)
+      aprobadores → nodes  (tarjeta por firmante, con su estado ya resuelto)
+    Los únicos formatters son conversiones de tipo que OData V4 impide hacer en
+    el servidor; ver ext/util/Historial.js.
+
+    ── Este diagrama es REAL, no de demostración ────────────────────────────────
+    En la app de aprobaciones el historial son datos de ejemplo mientras el iFlow
+    de CPI no exista, y cuando el pendiente es un apoderado no puede saber cuál
+    de los dos ya firmó. Aquí sí: el servicio ve TODAS las tareas vivas de la
+    propuesta, así que un apoderado sin tarea con el otro pendiente es un
+    apoderado que ya firmó.
+
+    Lo que no se puede saber sin el iFlow son las FECHAS y los comentarios de los
+    pasos ya firmados —viven en Payroll—, y de ahí el aviso de abajo.
+
+    ── Por qué la tarjeta se define CUATRO veces ────────────────────────────────
+    ProcessFlow es responsivo por diseño: _initZoomLevel() elige el nivel de zoom
+    según el ANCHO DEL PROPIO CONTROL, no el de la ventana —
+      < 600px → Four | 600-1023px → Three | >= 1024px → Two
+    — y cada nivel dibuja únicamente su propia agregación zoomLevel*Content. En la
+    columna media del FCL el control mide menos de 1024px, así que el nivel real
+    de esta app es Three la mayor parte del tiempo. Definir solo un nivel dejaba
+    la tarjeta sin usar y el nodo caía al render por defecto (solo el título).
+
+    ── IDs ─────────────────────────────────────────────────────────────────────
+    La app declara flexEnabled: true, que exige IDs estables en todo control de un
+    fragmento (adaptación de interfaz de usuario). Dentro de la plantilla del
+    binding de agregación UI5 les añade el sufijo del índice de fila al clonarlas
+    (flujoProcessFlow-0, -1, …), así que siguen siendo únicos.
+-->
+<core:FragmentDefinition
+    xmlns="sap.m"
+    xmlns:core="sap.ui.core"
+    xmlns:pf="sap.suite.ui.commons">
+
+    <VBox id="flujoContenedor" class="sapUiSmallMarginBeginEnd sapUiSmallMarginBottom">
+
+        <!--
+            Los pasos ya firmados salen sin fecha ni comentario: el diagrama se
+            deriva de las tareas vivas en BPA, que dicen QUÉ falta pero no cuándo
+            se firmó lo anterior. Ese detalle vive en Payroll y llegará el día que
+            exista el iFlow del historial (ver srv/domain/historial.service.js).
+        -->
+        <MessageStrip
+            id="flujoAvisoSinFechas"
+            text="{i18n>flujoSinFechasAviso}"
+            type="Information"
+            showIcon="true"
+            class="sapUiSmallMarginBottom" />
+
+        <pf:ProcessFlow
+            id="flujoProcessFlow"
+            lanes="{ path: 'niveles', templateShareable: false }"
+            nodes="{ path: 'aprobadores', templateShareable: false }"
+            scrollable="false"
+            wheelZoomable="false"
+            foldedCorners="false"
+            showLabels="false">
+
+            <!--
+                ── Columnas: un lane por nivel de aprobación ──────────────────
+
+                El anillo semántico alrededor del ícono (verde = nivel resuelto,
+                azul = alguna firma en curso, rojo = rechazo, gris = aún no le
+                toca) NO se enlaza: lo calcula el propio control agregando el
+                `state` de los nodos de cada lane
+                (ProcessFlow.NodeElement._calculateLaneStatePieChart), y llama a
+                setState() sobre cada cabecera en CADA render. Cualquier `state`
+                que se enlace aquí se pierde en el primer repintado.
+
+                Como los `estadoNodo` de los nodos los decide CAP, el color del
+                nivel sigue siendo consecuencia directa de la lógica de negocio:
+                el control solo hace el recuento.
+            -->
+            <pf:lanes>
+                <pf:ProcessFlowLaneHeader
+                    id="flujoNivel"
+                    laneId="{laneId}"
+                    position="{posicion}"
+                    text="{texto}"
+                    iconSrc="{icono}"
+                    tooltip="{resumen}" />
+            </pf:lanes>
+
+            <!-- ── Nodos: una tarjeta por firmante ───────────────────────── -->
+            <pf:nodes>
+                <!--
+                    core:require va en ESTE nodo y no en <core:FragmentDefinition>:
+                    la directiva solo surte efecto sobre nodos de control y su
+                    subárbol, y FragmentDefinition no lo es. Declararla arriba deja
+                    los formatters sin resolver ("formatter function ... not found").
+
+                    En `children`, targetType:'any' es imprescindible: sin él UI5
+                    intenta convertir el valor del modelo al tipo de la propiedad de
+                    destino (any[]) ANTES de aplicar el formatter y falla con
+                    "Don't know how to format String to any[]". El efecto es
+                    children=undefined en todos los nodos y el diagrama se dibuja
+                    sin ninguna flecha de conexión.
+
+                    NO se enlaza `highlighted`. Es tentador para marcar el paso en
+                    curso, pero basta con que UN nodo lo tenga para que ProcessFlow
+                    entre en "modo resaltado" y calcule el anillo de TODOS los
+                    niveles contando únicamente los nodos resaltados: los demás
+                    quedan en cero y sus anillos se pintan en gris, sin reflejar su
+                    estado real. El paso en curso ya se distingue por `focused`.
+                -->
+                <pf:ProcessFlowNode
+                    id="flujoNodo"
+                    core:require="{ Historial: 'centria/h2hpp/aprobaciones/ui5reasignacion/ext/util/Historial' }"
+                    nodeId="{nodeId}"
+                    laneId="{laneId}"
+                    children="{ path: 'hijos', targetType: 'any', formatter: 'Historial.aLista' }"
+                    state="{estadoNodo}"
+                    stateText="{estadoTexto}"
+                    focused="{esActual}"
+                    title="{nombre}"
+                    titleAbbreviation="{iniciales}">
+
+                    <!-- Zoom 1 — máximo detalle (zoom manual) -->
+                    <pf:zoomLevelOneContent>
+                        <VBox id="flujoZ1Caja" alignItems="Center" justifyContent="Center">
+                            <Avatar
+                                id="flujoZ1Foto"
+                                src="{ path: 'fotoUrl', formatter: 'Historial.foto' }"
+                                initials="{iniciales}"
+                                displaySize="M"
+                                displayShape="Square"
+                                fallbackIcon="sap-icon://employee"
+                                backgroundColor="Accent6"
+                                tooltip="{usuario}" />
+                            <Title id="flujoZ1Nombre" text="{nombre}" level="H6" wrapping="true"
+                                textAlign="Center" class="sapUiTinyMarginTop" />
+                            <Text id="flujoZ1Cargo" text="{cargo}" textAlign="Center" maxLines="2" />
+                            <ObjectStatus id="flujoZ1Estado" text="{decisionTexto}"
+                                state="{decisionValueState}" class="sapUiTinyMarginTop" />
+                            <!--
+                                targetType:'any' es obligatorio: en un binding de
+                                expresión UI5 convierte cada propiedad referenciada
+                                al tipo de la propiedad de destino ANTES de evaluar,
+                                y convertir la fecha a boolean lanza FormatException.
+                            -->
+                            <Text id="flujoZ1Fecha" text="{fechaTexto}" textAlign="Center"
+                                visible="{= !!${path:'fechaTexto', targetType:'any'} }" />
+                        </VBox>
+                    </pf:zoomLevelOneContent>
+
+                    <!-- Zoom 2 — pantalla ancha (>= 1024px de ancho del control) -->
+                    <pf:zoomLevelTwoContent>
+                        <VBox id="flujoZ2Caja" alignItems="Center" justifyContent="Center">
+                            <Avatar
+                                id="flujoZ2Foto"
+                                src="{ path: 'fotoUrl', formatter: 'Historial.foto' }"
+                                initials="{iniciales}"
+                                displaySize="S"
+                                displayShape="Square"
+                                fallbackIcon="sap-icon://employee"
+                                backgroundColor="Accent6"
+                                tooltip="{usuario}" />
+                            <Title id="flujoZ2Nombre" text="{nombre}" level="H6" wrapping="true"
+                                textAlign="Center" class="sapUiTinyMarginTop" />
+                            <Text id="flujoZ2Cargo" text="{cargo}" textAlign="Center" maxLines="2" />
+                            <ObjectStatus id="flujoZ2Estado" text="{decisionTexto}"
+                                state="{decisionValueState}" class="sapUiTinyMarginTop" />
+                        </VBox>
+                    </pf:zoomLevelTwoContent>
+
+                    <!-- Zoom 3 — columna media del FCL: el caso habitual aquí -->
+                    <pf:zoomLevelThreeContent>
+                        <VBox id="flujoZ3Caja" alignItems="Center" justifyContent="Center">
+                            <Avatar
+                                id="flujoZ3Foto"
+                                src="{ path: 'fotoUrl', formatter: 'Historial.foto' }"
+                                initials="{iniciales}"
+                                displaySize="XS"
+                                displayShape="Square"
+                                fallbackIcon="sap-icon://employee"
+                                backgroundColor="Accent6"
+                                tooltip="{usuario}" />
+                            <Title id="flujoZ3Nombre" text="{nombre}" level="H6" wrapping="true"
+                                textAlign="Center" class="sapUiTinyMarginTop" />
+                            <ObjectStatus id="flujoZ3Estado" text="{decisionTexto}"
+                                state="{decisionValueState}" />
+                        </VBox>
+                    </pf:zoomLevelThreeContent>
+
+                    <!-- Zoom 4 — móvil: el nodo es diminuto, solo cabe la foto -->
+                    <pf:zoomLevelFourContent>
+                        <VBox id="flujoZ4Caja" alignItems="Center" justifyContent="Center">
+                            <Avatar
+                                id="flujoZ4Foto"
+                                src="{ path: 'fotoUrl', formatter: 'Historial.foto' }"
+                                initials="{iniciales}"
+                                displaySize="XS"
+                                displayShape="Square"
+                                fallbackIcon="sap-icon://employee"
+                                backgroundColor="Accent6"
+                                tooltip="{nombre}" />
+                        </VBox>
+                    </pf:zoomLevelFourContent>
+                </pf:ProcessFlowNode>
+            </pf:nodes>
+        </pf:ProcessFlow>
+    </VBox>
+</core:FragmentDefinition>

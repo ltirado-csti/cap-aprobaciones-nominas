@@ -25,5 +25,45 @@ GET {{server}}{{path}}/TareasInbox(instanceID='mock-task-001')/adjuntos
 
 ###
 
-### GET Composición aprobadores
+### GET Composición aprobadores — nodos del ProcessFlow del historial
 GET {{server}}{{path}}/TareasInbox(instanceID='mock-task-001')/aprobadores
+
+###
+
+### GET Composición niveles — lanes (columnas) del mismo ProcessFlow
+GET {{server}}{{path}}/TareasInbox(instanceID='mock-task-001')/niveles
+
+###
+
+### GET Historial completo — lo que carga realmente el Object Page.
+### Comprobar aquí: posicion de los niveles 0,1,2 sin huecos; `hijos` encadenando
+### N1-1 → N2-1,N2-2 → N3-1.
+###
+### historialEsDemo distingue las dos mitades del diagrama:
+###   false → ECP confirmó al menos una firma; los nodos firmados llevan el
+###           usuario SAP real (p.ej. "ARODAS") y fecha de Payroll.
+###   true  → solo se ve el flujo previsto. En local es lo normal: sin destino
+###           CPI_H2H la llamada al iFlow falla y se cae al esqueleto.
+### Para ver el historial real hace falta el perfil hybrid: npm run watch:hybrid
+GET {{server}}{{path}}/TareasInbox(instanceID='mock-task-001')?$select=historialEsDemo&$expand=niveles,aprobadores
+
+###
+
+### POST directo al iFlow de ECP — para aislar si un diagrama vacío es culpa de
+### CAP o de la integración. Requiere token del destino Cloud_Integration, así
+### que en la práctica se lanza desde Postman con OAuth2 client credentials.
+### Un EtDetalle vacío con EpMensaje vacío suele significar clave mal formada:
+### revisar que IpLaufd vaya en yyyy-MM-dd y que IpBanco sea el código corto.
+# POST https://e400129-iflmap.hcisbt.br1.hana.ondemand.com/http/H2H/ECP/HistorialAprobaciones
+# Content-Type: application/json
+#
+# {
+#   "ZhrfH2hDetailAprobacionWf": {
+#     "IpBukrs": "0031",
+#     "IpLaufi": "23303P",
+#     "IpLaufd": "2026-08-07",
+#     "IpBtrtl": "3107",
+#     "IpBanco": "BBVA",
+#     "IpWaers": "PEN"
+#   }
+# }
