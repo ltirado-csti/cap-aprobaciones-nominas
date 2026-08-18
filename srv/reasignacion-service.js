@@ -206,7 +206,7 @@ class ReasignacionService extends cds.ApplicationService {
 
         const propuestas = await _propuestasEnCurso();
         const propuesta  = propuestas.find(p => p.propuestaID === propuestaID);
-        return odata.aplicarConsulta(propuesta?.[campo] ?? [], req);
+        return odata.aplicarConsulta(_filtrarPorClave(propuesta?.[campo] ?? [], req), req);
       });
     };
 
@@ -357,6 +357,42 @@ function _clavePeticion(req, campo) {
   return req.query?.SELECT?.from?.ref?.[0]?.where?.find?.(
     condicion => condicion?.ref?.[0] === campo
   )?.val ?? null;
+}
+
+/**
+ * Recorta una composición a la fila concreta cuando la petición trae su clave.
+ *
+ * POR QUÉ NO BASTA odata.aplicarConsulta
+ * --------------------------------------
+ * Al pedir UNA fila —PropuestasEnCurso('P')/firmantes(propuestaID='P',
+ * firmanteID='liberador')— CAP deja la clave en el `where` del SEGMENTO DE
+ * NAVEGACIÓN (query.SELECT.from.ref[1].where), no en query.SELECT.where, que es
+ * lo único que aplicarConsulta mira. Sin este recorte el handler devolvía la
+ * colección entera y CAP se quedaba con la PRIMERA fila: pedir el liberador
+ * contestaba con el primer apoderado, con sus datos y su estado.
+ *
+ * Nadie lo notaba mientras la UI solo leyera colecciones. Lo destapa el refresco
+ * por Common.SideEffects de la acción reasignar, que relee exactamente la fila
+ * reasignada: sin esto, refrescar habría PISADO la fila con datos de otra
+ * persona — peor que no refrescar.
+ *
+ * Se filtra por los pares clave/valor que CAP ya dejó resueltos en el último
+ * elemento de req.params, en vez de volver a interpretar el CQN: es el mismo
+ * dato, ya normalizado, y sirve igual para Firmante (firmanteID), NivelFlujo
+ * (laneId) y NodoFlujo (nodeId) sin que este helper conozca ninguna de las tres.
+ *
+ * En una lectura de colección ese elemento trae solo la clave del padre, que
+ * todas las filas cumplen: el filtro es entonces inocuo.
+ */
+function _filtrarPorClave(filas, req) {
+  const claves = req.params?.[req.params.length - 1];
+  if (!claves || typeof claves !== "object") return filas;
+
+  const pares = Object.entries(claves);
+  if (!pares.length) return filas;
+
+  return filas.filter(fila =>
+    pares.every(([campo, valor]) => String(fila?.[campo]) === String(valor)));
 }
 
 /**
@@ -645,20 +681,49 @@ function _construirFirmantes(propuestaID, rol, tarea, referencia, nivelMinVivo) 
     return [_construirFirmanteUnico(propuestaID, rol, tarea, referencia, nivelMinVivo)];
   }
 
-  // La lista completa: los que ya firmaron y los que aún pueden hacerlo. Se
-  // toma del contexto BPA (custom.*) y no de los destinatarios de la tarea,
-  // porque los que ya firmaron desaparecen de estos últimos y el admin necesita
-  // verlos igualmente para entender por qué la propuesta sigue abierta.
   const firmantes  = referencia.poolFirmantes  ?? [];
   const pendientes = referencia.poolPendientes ?? [];
-  const todos      = [...firmantes, ...pendientes.filter(correo => !firmantes.includes(correo))];
 
   // Sin tarea viva de apoderado el paso ya pasó: nadie de la lista es accionable.
   const enTarea = tarea ? (tarea.destinatariosTarea ?? []) : [];
 
+  // Quiénes tienen fila. Las TRES listas hacen falta y por motivos distintos:
+  //
+  //   firmantes  → ya firmaron y salieron del pool. Sin ellos el admin no
+  //                entiende por qué la propuesta sigue abierta ni cuántas
+  //                firmas lleva.
+  //   enTarea    → los destinatarios REALES de la tarea en BPA. Es la única
+  //                lista donde aparece alguien metido por una reasignación:
+  //                el PATCH cambia recipientUsers de la tarea, no la variable
+  //                custom.apoderadospendientes de la que salen las otras dos.
+  //                Omitirlo dejaba al sustituto SIN FILA —la pantalla seguía
+  //                mostrando al sustituido como si nada hubiera pasado, que es
+  //                justo lo que el administrador acababa de cambiar.
+  //   pendientes → los que el contexto da por pendientes y aún no tienen tarea
+  //                (ventana entre el loop back y la recreación de la tarea).
+  //
+  // normalizarUsuarios deduplica conservando el orden de aparición, así que el
+  // orden de la tabla es: primero quien firmó, luego quien puede firmar ahora.
+  const todos = perfiles.normalizarUsuarios([...firmantes, ...enTarea, ...pendientes]);
+
   return todos.map(correo => {
-    const yaFirmo    = firmantes.includes(correo);
-    const tieneTarea = Boolean(tarea) && enTarea.includes(correo);
+    const yaFirmo = firmantes.includes(correo);
+
+    // Con la tarea de apoderados VIVA, todo el que no haya firmado tiene aún una
+    // firma pendiente y se puede reasignar. Deliberadamente NO se exige estar en
+    // enTarea (recipientUsers).
+    //
+    // Las dos listas divergen en la práctica: recipientUsers se fija al CREAR la
+    // tarea y una reasignación anterior pudo cambiarla, mientras que
+    // custom.apoderadospendientes es la lista que el BPMN recalcula en cada
+    // firma. Un apoderado que esté en la segunda pero no en la primera es
+    // justamente el que MÁS necesita el botón: no ve la tarea en su inbox
+    // —getInboxTasks filtra por recipientUsers— así que no puede firmar, y sin
+    // reasignarlo la propuesta se queda esperando a alguien que no puede actuar.
+    //
+    // Marcarlo "No requerido" era doblemente erróneo: ese estado significa que el
+    // quórum se cerró sin él, y el quórum no se ha cerrado si la tarea sigue viva.
+    const tieneTarea = Boolean(tarea) && !yaFirmo;
 
     const base = {
       propuestaID,
@@ -670,6 +735,10 @@ function _construirFirmantes(propuestaID, rol, tarea, referencia, nivelMinVivo) 
       rol             : rol.label,
       nivel           : rol.nivel,
       usuario         : correo,
+      // Instancia de workflow de la tarea. No está declarada en la entidad —no
+      // se muestra— pero la acción de reasignar la necesita para escribir la
+      // variable del contexto de la que BPA saca los destinatarios.
+      workflowInstanceId: tarea?.workflowInstanceId ?? "",
       contadorFirmas  : referencia.contadorFirmas ?? 0,
       firmasRequeridas: referencia.firmasRequeridas ?? 0,
     };
@@ -711,6 +780,7 @@ function _construirFirmanteUnico(propuestaID, rol, tarea, referencia, nivelMinVi
     firmanteID      : rol.clave,
     rol             : rol.label,
     nivel           : rol.nivel,
+    workflowInstanceId: tarea?.workflowInstanceId ?? "",
     contadorFirmas  : 0,
     firmasRequeridas: 0,
   };

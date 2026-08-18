@@ -185,7 +185,49 @@ annotate ReasignacionService.Firmante with {
 // =============================================================================
 annotate ReasignacionService.Firmante actions {
     reasignar @( Core.OperationAvailable: { $edmJson: { $Path: 'in/reasignable' } },
-                 Common.Label: 'Reasignar' ) (
+                 Common.Label: 'Reasignar',
+
+                 // ── QUÉ REFRESCAR AL TERMINAR ────────────────────────────────
+                 //
+                 // Sin esto la pantalla se queda con el destinatario anterior
+                 // hasta que el usuario recarga a mano: la acción devuelve un
+                 // tipo plano (AccionReasignacion), no la entidad, así que Fiori
+                 // Elements no tiene nada que volver a leer por su cuenta.
+                 //
+                 // El prefijo es `in` —el nombre del parámetro de enlace que CAP
+                 // genera para las acciones bound, el mismo que ya usa
+                 // OperationAvailable aquí arriba—. Con `_it` la anotación
+                 // compila igual y no refresca nada.
+                 //
+                 // TargetProperties cubre la fila reasignada, que es el caso del
+                 // Liberador Final: su clave (firmanteID = 'liberador') no cambia
+                 // al reasignar, solo cambia quién es el destinatario.
+                 //
+                 // TargetEntities cubre lo que TargetProperties no puede: en el
+                 // pool de apoderados la clave de la fila ES el correo
+                 // (apoderado#<correo>), así que reasignar no modifica una fila
+                 // sino que borra una y crea otra — hay que releer la colección
+                 // entera. Y NivelFlujo/NodoFlujo son el diagrama de flujo, que
+                 // se compone de los mismos firmantes y quedaba igual de obsoleto.
+                 // PropuestasEnCurso entra porque su columna "Destinatario" es la
+                 // lista de destinatarios vivos de la propuesta.
+                 Common.SideEffects: {
+                     TargetProperties: [
+                         'in/usuario',
+                         'in/estadoFirmante',
+                         'in/estadoCriticidad',
+                         'in/reasignable',
+                         'in/motivoNoReasignable',
+                         'in/instanceID',
+                         'in/estadoTarea',
+                     ],
+                     TargetEntities  : [
+                         '/ReasignacionService.EntityContainer/Firmante',
+                         '/ReasignacionService.EntityContainer/NivelFlujo',
+                         '/ReasignacionService.EntityContainer/NodoFlujo',
+                         '/ReasignacionService.EntityContainer/PropuestasEnCurso',
+                     ],
+                 } ) (
         nuevoUsuario @( Common.Label: 'Nuevo destinatario' )
     );
 };

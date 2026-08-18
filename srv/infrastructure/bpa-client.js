@@ -282,6 +282,78 @@ async function reasignarTarea(taskId, destinatarios) {
   }
 }
 
+// ─── CONTEXTO DE UNA INSTANCIA EN CURSO ───────────────────────────────────────
+
+/**
+ * Lee el contexto de una INSTANCIA de workflow (no el de una tarea).
+ *
+ * No es lo mismo que readContext(taskId), aunque se parezcan: aquel devuelve el
+ * contexto tal y como lo ve la tarea, y este el de la instancia, que es el que
+ * escribe actualizarContextoInstancia(). Para un ciclo leer-modificar-escribir
+ * hay que leer del MISMO sitio donde se va a escribir.
+ *
+ * Endpoint: GET /v1/workflow-instances/{workflowInstanceId}/context
+ *
+ * @param {string} instanceId - workflowInstanceId del TaskInstance
+ * @returns {Promise<object|null>} contexto de la instancia o null si falla
+ */
+async function leerContextoInstancia(instanceId) {
+  const svc = await getSvc();
+  try {
+    const contexto = await svc.get(`/workflow-instances/${instanceId}/context`);
+    LOG.info(`leerContextoInstancia OK | instanceId=${instanceId}`);
+    return contexto;
+  } catch (error) {
+    LOG.error(`leerContextoInstancia ERROR | instanceId=${instanceId}`, error.message);
+    return null;
+  }
+}
+
+/**
+ * Actualiza el contexto de una instancia de workflow EN CURSO.
+ *
+ * POR QUÉ HACE FALTA
+ * ------------------
+ * Reasignar con PATCH /task-instances/{id} cambia los destinatarios de esa
+ * INSTANCIA DE TAREA y nada más. Las variables de las que BPA saca los
+ * destinatarios al CREAR la tarea (custom.apoderadospendientes) siguen con el
+ * usuario anterior, con dos consecuencias que se ven en la app de reasignación:
+ *
+ *   · el sustituido reaparece en la pantalla y en el diagrama, porque esas
+ *     variables son la fuente de la que la app compone los firmantes;
+ *   · si el flujo hace loop back —rechazo de Payroll, o la siguiente firma del
+ *     quórum— BPA recrea la tarea desde la variable y la reasignación se pierde.
+ *
+ * SEMÁNTICA DE LA MEZCLA: el PATCH sustituye las claves de PRIMER NIVEL que se
+ * le envían; no hace merge en profundidad. Enviar { custom: { unaVariable } }
+ * borraría el resto de `custom`. Por eso quien llama debe leer el contexto
+ * entero, modificar la hoja que le interesa y devolver la rama de primer nivel
+ * COMPLETA. Ver _persistirDestinatarios en domain/reasignacion.service.js.
+ *
+ * Endpoint: PATCH /v1/workflow-instances/{workflowInstanceId}/context
+ *
+ * REQUIERE el role collection "WorkflowAdmin" en la identidad del destino, igual
+ * que reasignarTarea(). Si el subaccount no lo tiene concedido, esta llamada
+ * falla con 403 y quien llama debe degradar sin romper la reasignación: la tarea
+ * actual ya quedó reasignada y el sustituto puede trabajar.
+ *
+ * @param {string} instanceId - workflowInstanceId del TaskInstance
+ * @param {object} parche     - ramas de primer nivel del contexto, completas
+ * @returns {Promise<{ success: boolean, mensaje: string, status: number|null }>}
+ */
+async function actualizarContextoInstancia(instanceId, parche) {
+  const svc = await getSvc();
+  try {
+    await svc.patch(`/workflow-instances/${instanceId}/context`, parche);
+    LOG.info(`actualizarContextoInstancia OK | instanceId=${instanceId} claves=${Object.keys(parche).join(",")}`);
+    return { success: true, mensaje: "Contexto actualizado correctamente", status: 200 };
+  } catch (error) {
+    const status = _codigoHttp(error);
+    LOG.error(`actualizarContextoInstancia ERROR | instanceId=${instanceId} status=${status ?? "?"}`, error.message);
+    return { success: false, mensaje: error.message, status };
+  }
+}
+
 // ─── INICIAR INSTANCIA ────────────────────────────────────────────────────────
 
 /**
@@ -372,6 +444,8 @@ module.exports = {
   listarTareasEnCurso,
   obtenerTarea,
   readContext,
+  leerContextoInstancia,
+  actualizarContextoInstancia,
   completarTarea,
   reasignarTarea,
   iniciarInstancia,
