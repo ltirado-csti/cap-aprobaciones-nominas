@@ -10,11 +10,12 @@
  *
  * ── SUSTITUIR, NO REEMPLAZAR ─────────────────────────────────────────────────
  *
- * Con el quórum de v1.2.0 la tarea de apoderado tiene un POOL de destinatarios.
- * Mandar a BPA el correo del sustituto a secas dejaría la tarea con un único
- * destinatario y expulsaría del flujo a los apoderados que todavía no habían
- * firmado. Por eso se envía la lista COMPLETA con el correo saliente cambiado
- * por el entrante: el pool conserva a los demás.
+ * Los DOS roles activos tienen un POOL de destinatarios: los apoderados desde el
+ * quórum de v1.2.0, y el liberador desde que Payroll puede dejar varios correos
+ * en usuarioLiberador. Mandar a BPA el correo del sustituto a secas dejaría la
+ * tarea con un único destinatario y expulsaría del flujo a los demás. Por eso se
+ * envía la lista COMPLETA con el correo saliente cambiado por el entrante: el
+ * pool conserva a los demás.
  *
  * ── DOS ESCRITURAS, NO UNA ───────────────────────────────────────────────────
  *
@@ -22,8 +23,8 @@
  *
  *   1. PATCH de la TAREA (recipientUsers) — el sustituto ve la tarea ya mismo.
  *   2. PATCH del CONTEXTO de la instancia — la variable de la que BPA saca los
- *      destinatarios al CREAR la tarea (custom.apoderadospendientes en el pool,
- *      startEvent.propuesta.usuarioLiberador en el liberador).
+ *      destinatarios al CREAR la tarea (custom.apoderadospendientes en los
+ *      apoderados, startEvent.propuesta.usuarioLiberador en el liberador).
  *
  * Sin el paso 2 la reasignación es un parche sobre una instancia de tarea: el
  * sustituido reaparece en la pantalla de reasignación y en el diagrama —que se
@@ -82,9 +83,12 @@ const REGEX_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  * trabajar. Se informa al administrador de que el cambio puede no sobrevivir a
  * un loop back, en vez de fingir un éxito completo o abortar algo ya hecho.
  *
+ * @param {string} workflowInstanceId - instancia de workflow de la tarea
+ * @param {object} rolBpa             - rol de la tarea (resolverRolBpa())
+ * @param {string[]} destinatarios    - lista COMPLETA ya sustituida
  * @returns {Promise<{ success: boolean, mensaje: string }>}
  */
-async function _persistirEnContexto(workflowInstanceId, rolBpa, entrante, destinatarios) {
+async function _persistirEnContexto(workflowInstanceId, rolBpa, destinatarios) {
     if (!workflowInstanceId) {
         return { success: false, mensaje: "no se conoce la instancia de workflow de la tarea" };
     }
@@ -94,15 +98,24 @@ async function _persistirEnContexto(workflowInstanceId, rolBpa, entrante, destin
         return { success: false, mensaje: "no se pudo leer el contexto de la instancia" };
     }
 
-    // Dónde vive el destinatario según el rol:
-    //   pool      → custom.apoderadospendientes, CSV que el BPMN recalcula en
-    //               cada firma y del que salen los destinatarios de la tarea.
-    //   liberador → startEvent.propuesta.usuarioLiberador, un único correo.
-    const ruta = rolBpa.esPool
+    // Dónde vive la lista de destinatarios según el rol:
+    //   apoderados → custom.apoderadospendientes, CSV que el BPMN recalcula en
+    //                cada firma y del que salen los destinatarios de la tarea.
+    //   liberador  → startEvent.propuesta.usuarioLiberador, el CSV que dejó
+    //                Payroll. Nadie más lo recalcula, así que este PATCH es lo
+    //                único que puede cambiarlo.
+    // La rama la decide campoPendientes y no esPool: los dos roles son pools,
+    // pero solo los apoderados tienen variable propia (ver config/perfiles.js).
+    const ruta = rolBpa.campoPendientes
         ? _rutaCustom(contexto, rolBpa.campoPendientes)
         : `${rolBpa.contextPath}.${rolBpa.campoPropuesta}`;
 
-    const valor = rolBpa.esPool ? destinatarios.join(",") : entrante;
+    // SIEMPRE la lista completa, nunca solo el entrante. Escribir el correo
+    // suelto es lo que borraba a los demás liberadores del contexto: la tarea
+    // conservaba a todos (paso 6) pero el contexto se quedaba con uno, y el
+    // siguiente loop back recreaba la tarea para esa única persona. Con un solo
+    // destinatario el resultado es el mismo de antes: su correo, a secas.
+    const valor = destinatarios.join(",");
 
     const parche = _parcheRuta(contexto, ruta, valor);
     if (!parche) {
@@ -173,7 +186,7 @@ function _parcheRuta(contexto, ruta, valor) {
  *   enTarea → recipientUsers de la instancia de tarea. Es quien VE la tarea:
  *             el inbox de la app de aprobaciones filtra por este campo.
  *   pool    → la unión de esa lista con la del contexto
- *             (custom.apoderadospendientes en el pool,
+ *             (custom.apoderadospendientes en los apoderados,
  *             startEvent.propuesta.usuarioLiberador en el liberador). Es quien
  *             DEBERÍA poder firmar.
  *
@@ -203,9 +216,7 @@ async function _poolDeLaTarea(instanceID, tareaBpa, rolBpa) {
 
     const propuesta = _navegarRuta(contexto, rolBpa.contextPath) ?? {};
 
-    const delContexto = rolBpa.esPool
-        ? perfiles.resolverQuorumApoderados(contexto, propuesta).pendientes
-        : perfiles.normalizarUsuarios(propuesta[rolBpa.campoPropuesta]);
+    const delContexto = perfiles.resolverDestinatarios(rolBpa, contexto, propuesta).pendientes;
 
     const pool = perfiles.normalizarUsuarios([...enTarea, ...delContexto]);
 
@@ -374,7 +385,7 @@ function registrarHandlers(srv, { buscarFirmante }) {
         //    sustituido reaparece en la pantalla y vuelve al flujo en el
         //    siguiente loop back. No es crítico: si falla, se avisa y se sigue.
         const persistencia = await _persistirEnContexto(
-            firmante.workflowInstanceId, rolBpa, entrante, pendientes);
+            firmante.workflowInstanceId, rolBpa, pendientes);
 
         if (!persistencia.success) {
             LOG.error(
@@ -390,9 +401,13 @@ function registrarHandlers(srv, { buscarFirmante }) {
             `destinatarios=${destinatarios.join(",")}`
         );
 
-        const base = rolBpa.esPool
+        // La coletilla depende de si queda alguien más en la tarea, no del rol:
+        // con pool en los dos roles, un liberador de una lista de tres necesita
+        // esa aclaración tanto como un apoderado, y el liberador único de
+        // siempre no debe recibirla.
+        const base = destinatarios.length > 1
             ? `${rolBpa.label} reasignado de ${saliente} a ${entrante}. ` +
-              `Los demás apoderados pendientes conservan su tarea.`
+              `Los demás destinatarios de la tarea la conservan.`
             : `${rolBpa.label} reasignado de ${saliente} a ${entrante}`;
 
         // La advertencia va en el mensaje de éxito y no en un error: la tarea SÍ

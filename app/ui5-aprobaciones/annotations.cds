@@ -23,7 +23,7 @@ annotate PagosService.TareasInbox with @(
     },
 
     // ── Filtros de la barra de filtros ────────────────────────────────────────
-    // Solo estos cuatro: el botón "Adaptar filtros" está oculto (ver
+    // Solo estos cinco: el botón "Adaptar filtros" está oculto (ver
     // ext/controller/ListaHandler.controller.js), así que esta lista es
     // literalmente lo único con lo que el usuario puede filtrar.
     //
@@ -34,6 +34,7 @@ annotate PagosService.TareasInbox with @(
         sociedad,
         banco,
         fechaPropuestaPago,
+        fechaPago,
         estadoPP,
     ],
 
@@ -69,11 +70,27 @@ annotate PagosService.TareasInbox with @(
         // Vacío en las tareas de liberación, que no tienen quórum.
         { $Type: 'UI.DataField', Value: firmasTexto, Label: 'Firmas', ![@UI.Importance]: #Medium },
 
-        // Acción masiva de la toolbar del List Report — reusa la bound action
-        // apoderadoAprobar(). FE la invoca una vez por contexto seleccionado en
-        // un $batch (selectionMode: Multi en el manifest). Su habilitación la
-        // controla Core.OperationAvailable: { $Path: 'esApoderado' } más abajo.
-        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.apoderadoAprobar', Label: 'Aprobar masivo' },
+        // Acciones masivas de la toolbar del List Report — reusan las bound
+        // actions apoderadoAprobar()/apoderadoRechazar(comentario). FE las
+        // invoca una vez por contexto seleccionado en un $batch (selectionMode:
+        // Multi en el manifest). Su habilitación la controla
+        // Core.OperationAvailable: { $Path: 'in/esApoderado' } más abajo.
+        //
+        // apoderadoRechazar tiene un parámetro obligatorio (comentario): FE
+        // abre el diálogo estándar de parámetros de acción UNA sola vez y
+        // aplica el mismo comentario a cada tarea seleccionada — no hace
+        // falta código de frontend adicional para esto.
+        //
+        // Criticality/IconUrl declaran la intencion (positivo/negativo) igual que
+        // en UI.Identification. En el footer del Object Page sap.fe los traduce a
+        // boton Accept/Reject con icono; en la toolbar de la tabla NO lo hace —
+        // ahi todas las acciones se plantillan como Transparent sin icono. El
+        // acabado visual de estos dos botones lo pone
+        // ext/controller/ListaHandler.controller.js sobre el control ya creado.
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.apoderadoAprobar',  Label: 'Aprobar masivo',
+          Criticality: #Positive, IconUrl: 'sap-icon://accept' },
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.apoderadoRechazar', Label: 'Rechazar masivo',
+          Criticality: #Negative, IconUrl: 'sap-icon://decline' },
 
         // Necesario en $select para que la columna de rechazo pinte su color
         { $Type: 'UI.DataField', Value: notifCriticidad, ![@UI.Hidden]: true },
@@ -99,7 +116,7 @@ annotate PagosService.TareasInbox with @(
     // Referencia oficial SAP para acción bound: '<Servicio>.<NombreAcción>' (sin prefijo de entidad).
     //
     // Visibilidad por rol vía ![@UI.Hidden] dinámico ($edmJson/$Not/$Path):
-    //   - Apoderado (esApoderado=true): ve Aprobar y Observar.
+    //   - Apoderado (esApoderado=true): ve Aprobar y Rechazar.
     //   - Liberador (esLiberador=true): ve Liberar, Rechazar y Anular.
     //   - Coordinador: anulado en v1.1.0 → ![@UI.Hidden]: true (constante).
     // Requiere que esApoderado/esLiberador estén en el $select del Object Page;
@@ -108,7 +125,7 @@ annotate PagosService.TareasInbox with @(
         // Determining: true → botón en el footer del Object Page (no en la toolbar del header).
         { $Type: 'UI.DataFieldForAction', Action: 'PagosService.apoderadoAprobar',  Label: 'Aprobar',  Criticality: #Positive, IconUrl: 'sap-icon://accept', Determining: true,
           ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esApoderado' }] } } },
-        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.apoderadoObservar', Label: 'Observar', Criticality: #Negative, IconUrl: 'sap-icon://message-warning', Determining: true,
+        { $Type: 'UI.DataFieldForAction', Action: 'PagosService.apoderadoRechazar', Label: 'Rechazar', Criticality: #Negative, IconUrl: 'sap-icon://decline', Determining: true,
           ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esApoderado' }] } } },
         { $Type: 'UI.DataFieldForAction', Action: 'PagosService.liberadorLiberar',  Label: 'Liberar',  Criticality: #Positive, IconUrl: 'sap-icon://accept', Determining: true,
           ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esLiberador' }] } } },
@@ -187,25 +204,57 @@ annotate PagosService.TareasInbox with @(
 
     UI.FieldGroup#DatosGenerales: {
         Label: 'Datos Generales',
+        // Modalidad, N° Firmas y Analista salieron del formulario a pedido de
+        // negocio; quedan comentadas abajo, en su sitio. Es solo la UI: los tres
+        // campos siguen en TareasInbox y los sigue poblando pagos-service.js.
         Data : [
             { $Type: 'UI.DataField',        Value: sociedad,              Label: 'Sociedad' },
             { $Type: 'UI.DataField',        Value: numeroPropuesta,       Label: 'N° Propuesta' },
             { $Type: 'UI.DataField',        Value: version,               Label: 'Versión' },
-            { $Type: 'UI.DataField',        Value: modalidadPP,           Label: 'Modalidad' },
+         // { $Type: 'UI.DataField',        Value: modalidadPP,           Label: 'Modalidad' },
             { $Type: 'UI.DataField',        Value: banco,                 Label: 'Banco' },
             { $Type: 'UI.DataField',        Value: existeDocumento,       Label: 'Existe Documento' },
-            { $Type: 'UI.DataField',        Value: contadorFirma,         Label: 'N° Firmas' },
+         // { $Type: 'UI.DataField',        Value: contadorFirma,         Label: 'N° Firmas' },
 
             // Quórum de apoderados. La lista completa contesta "¿quién más
             // puede firmar esto?", que es la pregunta que se hace el apoderado
             // al ver una propuesta que sigue pendiente después de su firma.
-            { $Type: 'UI.DataField',        Value: usuariosApoderados,    Label: 'Apoderados habilitados' },
-            { $Type: 'UI.DataField',        Value: apoderadosFirmantes,   Label: 'Ya firmaron' },
-            { $Type: 'UI.DataField',        Value: apoderadosPendientes,  Label: 'Firmas pendientes de' },
+            //
+            // OCULTOS EN LA TAREA DEL LIBERADOR, con el mismo ![@UI.Hidden]
+            // dinámico que ya usa firmasTexto en la cabecera. Los tres salen de
+            // _extraerQuorum (srv/pagos-service.js), que devuelve el bloque vacío
+            // cuando la tarea no es de apoderado, así que en liberación se
+            // pintaban con un guion. Ese guion se lee como "falta el dato",
+            // cuando lo cierto es que NO APLICA: el quórum pertenece al paso de
+            // apoderados y sus variables ni siquiera existen en el contexto del
+            // proceso raíz, donde vive la tarea del liberador — el subproceso
+            // solo devuelve `resultadoapoderados`.
+            //
+            // Quién firmó y cuándo se sigue viendo en el diagrama del historial,
+            // que lo toma de ECP y además trae las fechas reales.
+            { $Type: 'UI.DataField',        Value: usuariosApoderados,    Label: 'Apoderados habilitados',
+              ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esApoderado' }] } } },
+            { $Type: 'UI.DataField',        Value: apoderadosFirmantes,   Label: 'Ya firmaron',
+              ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esApoderado' }] } } },
+            { $Type: 'UI.DataField',        Value: apoderadosPendientes,  Label: 'Firmas pendientes de',
+              ![@UI.Hidden]: { $edmJson: { $Not: [{ $Path: 'esApoderado' }] } } },
 
-            { $Type: 'UI.DataField',        Value: analista,              Label: 'Analista' },
+         // { $Type: 'UI.DataField',        Value: analista,              Label: 'Analista' },
             { $Type: 'UI.DataField',        Value: usuarioCreacion,       Label: 'Creado por' },
-            { $Type: 'UI.DataFieldWithUrl', Value: urlPDF, Url: urlPDF,  Label: 'PDF' },
+            { $Type: 'UI.DataField',        Value: usuarioRevisor,        Label: 'Revisado por' },
+            { $Type: 'UI.DataField',        Value: cantidad,              Label: 'Cant. Registros' },
+            // urlPDF NO se declara aquí. Antes era un DataFieldWithUrl —un link a
+            // una entidad media que no existía en el modelo, o sea un 404— y el
+            // PDF pasó a abrirse con sap.m.PDFViewer desde el botón "Ver PDF"
+            // (manifest.json → content > header > actions, y ext/util/VisorPDF.js).
+            //
+            // Tampoco se deja como DataField oculto: al contrario de lo que
+            // sugiere el truco de los flags de rol de abajo, un ![@UI.Hidden]
+            // ESTÁTICO no entra en el $select del Object Page —lo que allí
+            // funciona es que esApoderado/esLiberador se referencian desde
+            // expresiones ![@UI.Hidden] dinámicas—, así que el campo llegaba
+            // siempre vacío al contexto. VisorPDF.js lo pide con
+            // Context#requestProperty, que va al servidor cuando falta.
             // Flags de rol ocultos: NO se renderizan (![@UI.Hidden]: true) pero
             // fuerzan que esApoderado/esLiberador entren al $select del Object Page,
             // para que el ![@UI.Hidden] dinámico de los botones del header pueda evaluar.
@@ -289,7 +338,7 @@ annotate PagosService.EstadosPropuesta with {
 // =============================================================================
 // annotate PagosService.TareasInbox actions {
 //     apoderadoAprobar  @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esApoderado' } }, Common.Label: 'Aprobar'      );
-//     apoderadoObservar @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esApoderado' } }, Common.Label: 'Observar'     );
+//     apoderadoRechazar @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esApoderado' } }, Common.Label: 'Rechazar'     );
 //     liberadorLiberar  @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esLiberador' } }, Common.Label: 'Liberar'      );
 //     liberadorRechazar @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esLiberador' } }, Common.Label: 'Rechazar'     );
 //     liberadorAnular   @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esLiberador' } }, Common.Label: 'Anular'       );
@@ -299,7 +348,7 @@ annotate PagosService.EstadosPropuesta with {
 annotate PagosService.TareasInbox actions {
     apoderadoAprobar  @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esApoderado' } }, Common.Label: 'Aprobar',
                           Common.SideEffects: { TargetEntities: ['/PagosService.EntityContainer/TareasInbox'] } );
-    apoderadoObservar @( Core.OperationAvailable: true, Common.Label: 'Observar',
+    apoderadoRechazar @( Core.OperationAvailable: { $edmJson: { $Path: 'in/esApoderado' } }, Common.Label: 'Rechazar',
                           Common.SideEffects: { TargetEntities: ['/PagosService.EntityContainer/TareasInbox'] } );
     liberadorLiberar  @( Core.OperationAvailable: true, Common.Label: 'Liberar',
                           Common.SideEffects: { TargetEntities: ['/PagosService.EntityContainer/TareasInbox'] } );
@@ -309,6 +358,23 @@ annotate PagosService.TareasInbox actions {
                           Common.SideEffects: { TargetEntities: ['/PagosService.EntityContainer/TareasInbox'] } );
     coordinadorAprobar  @( Core.OperationAvailable: false, Common.Label: 'Aprobar (CO)'  );
     coordinadorRechazar @( Core.OperationAvailable: false, Common.Label: 'Rechazar (CO)' );
+};
+
+// =============================================================================
+// Diálogo de parámetros de acción — comentario de rechazo del Apoderado
+//
+// apoderadoRechazar(comentario: String) no tiene botón custom: lo invoca Fiori
+// Elements directamente (ver DataFieldForAction en UI.Identification/LineItem
+// más arriba), que abre su Action Parameter Dialog estándar generado desde los
+// parámetros de la acción. Sin esta anotación ese diálogo pinta el comentario
+// como un <Input> de una sola línea; @UI.MultiLineText: true es la anotación
+// que FE reconoce para pintar un <TextArea> en su lugar (ver SAPUI5 SDK,
+// "Action Parameter Dialog" → Supported Annotations).
+// =============================================================================
+annotate PagosService.TareasInbox actions {
+    apoderadoRechazar (
+        comentario @( Common.Label: 'Comentario', UI.MultiLineText: true )
+    );
 };
 
 // =============================================================================

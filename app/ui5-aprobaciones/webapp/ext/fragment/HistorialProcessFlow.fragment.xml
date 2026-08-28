@@ -11,7 +11,7 @@
 
     ── El fragmento NO tiene lógica ─────────────────────────────────────────────
     Enlaza dos colecciones que CAP ya entrega calculadas (srv/domain/historial.service.js):
-      niveles     → lanes  (columnas: Analista → Apoderados → Liberador)
+      niveles     → lanes  (columnas: Analista → Coordinador → Apoderados → Liberador)
       aprobadores → nodes  (tarjeta por firmante, con su estado ya resuelto)
     Los únicos formatters son conversiones de tipo que OData V4 impide hacer en
     el servidor; ver ext/util/Historial.js.
@@ -44,7 +44,7 @@
     xmlns:core="sap.ui.core"
     xmlns:pf="sap.suite.ui.commons">
 
-    <VBox id="historialContenedor" class="sapUiSmallMarginBeginEnd sapUiSmallMarginBottom">
+    <VBox id="historialContenedor" class="sapUiSmallMarginBeginEnd sapUiSmallMarginBottom h2hFlujoDesplazable">
 
         <!--
             Aviso de historial sin confirmar. `historialEsDemo` lo calcula CAP: es
@@ -62,8 +62,58 @@
             visible="{historialEsDemo}"
             class="sapUiSmallMarginBottom" />
 
+        <!--
+            ── Barra de zoom ───────────────────────────────────────────────────
+
+            El nivel de zoom del ProcessFlow NO es una propiedad que se pueda
+            enlazar de forma útil: el control lo recalcula desde su PROPIO ancho
+            en cada redimensión (_initZoomLevel), así que cualquier valor
+            enlazado se pierde. La vía soportada son sus métodos zoomIn() y
+            zoomOut(), que es lo que hacen los handlers de ext/util/Historial.js.
+
+            Consecuencia que conviene conocer: al cambiar el tamaño del control
+            —abrir o cerrar una columna del FCL— el control vuelve a elegir el
+            nivel por ancho y descarta el zoom manual. Es comportamiento del
+            control, no un fallo de la app.
+
+            El core:require va aquí y no en el VBox contenedor: la plantilla de
+            los nodos se clona por fila y necesita el suyo propio (ver el
+            comentario del ProcessFlowNode), así que cada subárbol declara el que
+            usa en lugar de depender de un alias heredado.
+        -->
+        <Toolbar
+            id="historialBarraZoom"
+            core:require="{ Historial: 'centria/h2hpp/aprobaciones/ui5aprobaciones/ext/util/Historial' }"
+            design="Transparent"
+            style="Clear"
+            width="100%">
+            <Button
+                id="historialAcercar"
+                icon="sap-icon://zoom-in"
+                type="Transparent"
+                text="{i18n>historialAcercarBoton}"
+                press="Historial.acercar" />
+            <Button
+                id="historialAlejar"
+                icon="sap-icon://zoom-out"
+                type="Transparent"
+                text="{i18n>historialAlejarBoton}"
+                press="Historial.alejar" />
+        </Toolbar>
+
+        <!--
+            La clase h2hFlujoCentrado centra el diagrama con `margin` automático
+            y NO con alineación flex del contenedor. La diferencia importa desde
+            que hay zoom: un hijo centrado con align-items queda recortado por la
+            izquierda cuando es más ancho que su caja, y esa parte ya no se puede
+            alcanzar con la barra de desplazamiento. Con margin automático el
+            diagrama se centra mientras cabe y, cuando no cabe, los márgenes se
+            quedan en cero y el scroll horizontal del contenedor llega a todo.
+            Ver webapp/css/estilos.css.
+        -->
         <pf:ProcessFlow
             id="historialProcessFlow"
+            class="h2hFlujoCentrado"
             lanes="{ path: 'niveles', templateShareable: false }"
             nodes="{ path: 'aprobadores', templateShareable: false }"
             scrollable="false"

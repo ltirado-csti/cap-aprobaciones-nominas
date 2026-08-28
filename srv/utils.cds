@@ -6,9 +6,12 @@
 //
 // Fuentes de datos reales (verificadas en código fuente):
 //
-//   PDF de propuesta  → SAP Gateway /WfObtenerPDFH2HSet (base64 directo)
-//                       El UI5 ya lo renderiza con pdf.js (PDFDialog.js)
-//                       CAP lo expone para descarga sin necesidad de pdfkit
+//   PDF de propuesta  → CPI (iFlow pendiente de publicar) → base64 directo
+//                       Toda la comunicación con SAP pasa por Cloud Integration;
+//                       la app UI5 anterior sí llamaba a /WfObtenerPDFH2HSet de
+//                       Gateway, pero ese canal directo NO se usa en este
+//                       proyecto. El visor vive en PagosService.PropuestaPDF
+//                       (entidad media), no aquí.
 //
 //   PDF de aprobaciones → se construye server-side con pdfkit
 //                         usando datos de HANA /PropuestaPagoAprobadores
@@ -42,7 +45,7 @@ service UtilsService {
 
   // ── PDF ───────────────────────────────────────────────────────
 
-  @Common.Label: 'Obtener PDF de propuesta desde SAP Gateway'
+  @Common.Label: 'Obtener PDF de propuesta desde SAP (vía CPI)'
   function obtenerPDFPropuesta(
     NroPP    : String,
     Sociedad : String,

@@ -100,7 +100,6 @@ modules:
       build-result: dist
       builder: custom
       commands:
-        - npm install
         - npm run build
       supported-platforms: []
 
@@ -112,7 +111,6 @@ modules:
       build-result: dist
       builder: custom
       commands:
-        - npm install
         - npm run build
       supported-platforms: []
 
@@ -173,5 +171,4 @@ build-parameters:
   before-all:
     - builder: custom
       commands:
-        - npm ci
         - npx cds build --production

@@ -80,6 +80,12 @@ const DECISIONES = {
     LIBERADO : { texto: "Liberado",  estado: "Positive", valueState: "Success", actual: false },
     FIRMADO  : { texto: "Firmado",   estado: "Positive", valueState: "Success", actual: false },
     REGISTRADO:{ texto: "Registrado",estado: "Positive", valueState: "Success", actual: false },
+    // Paso de revisión del coordinador. Verde como REGISTRADO y por el mismo
+    // motivo: ni el analista ni el coordinador aprueban la propuesta —la
+    // preparan y la revisan—, así que cuando el flujo llega a los apoderados su
+    // parte ya está hecha. Pintarlos "en curso" o "pendiente" sugeriría que
+    // falta una decisión suya que nadie va a tomar.
+    REVISADO : { texto: "Revisado",   estado: "Positive", valueState: "Success", actual: false },
     OBSERVADO: { texto: "Observado", estado: "Negative", valueState: "Error",   actual: false },
     RECHAZADO: { texto: "Rechazado", estado: "Negative", valueState: "Error",   actual: false },
     ANULADO  : { texto: "Anulado",   estado: "Negative", valueState: "Error",   actual: false },
@@ -110,13 +116,15 @@ const DECISION_DESCONOCIDA = { texto: "", estado: "Neutral", valueState: "None",
  *               tarea con pool, y el orden lo decide quién firma primero.
  *   "3"       → liberador final.
  *
- * El nivel 1 (analista) no sale de aquí: ECP registra aprobaciones, y el
- * registro de la propuesta en Payroll no es una de ellas. Lo aporta el esqueleto.
+ * Los niveles 1 (analista) y 2 (coordinador) no salen de aquí: ECP registra
+ * APROBACIONES, y ni el registro de la propuesta en Payroll ni su revisión lo
+ * son. Los aporta el esqueleto, que es además quien conoce a sus usuarios
+ * (usuarioCreacion y usuarioRevisor de la propuesta).
  */
 const PERFIL_PAYROLL = {
-    "1": { nivel: 2, orden: 1, rol: "AP" },
-    "2": { nivel: 2, orden: 2, rol: "AP" },
-    "3": { nivel: 3, orden: 1, rol: "LI" },
+    "1": { nivel: 3, orden: 1, rol: "AP" },
+    "2": { nivel: 3, orden: 2, rol: "AP" },
+    "3": { nivel: 4, orden: 1, rol: "LI" },
 };
 
 /**
@@ -146,7 +154,7 @@ const PERFILES_LANE = {
     AN: { descripcion: "Analista",       icono: "sap-icon://employee" },
     AP: { descripcion: "Apoderados",     icono: "sap-icon://signature" },
     LI: { descripcion: "Liberador",      icono: "sap-icon://accept" },
-    CO: { descripcion: "Coordinación",   icono: "sap-icon://employee-approvals" },
+    CO: { descripcion: "Coordinador",    icono: "sap-icon://employee-approvals" },
 };
 
 const LANE_POR_DEFECTO = { descripcion: "Aprobación", icono: "sap-icon://employee" };
@@ -440,7 +448,7 @@ function _construirNodo(fila, instanceID) {
         orden             : fila.orden,
         hijos             : "",
         usuario           : fila.usuario,
-        nombre            : fila.nombre,
+        nombre            : _rotuloPersona(fila.nombre),
         cargo             : fila.cargo || _cargoPorRol(fila.rol),
         iniciales         : _calcularIniciales(fila.nombre || fila.usuario),
         fotoUrl           : fila.fotoUrl,
@@ -555,6 +563,21 @@ function _cargoPorRol(rol) {
 }
 
 /**
+ * Rótulo de la tarjeta, en MAYÚSCULAS.
+ *
+ * Todo el diagrama identifica a las personas por su usuario, no por su nombre:
+ * ECP entrega el usuario SAP ya en mayúsculas ("ARODAS") y del lado de BPA lo
+ * único disponible es la parte local del correo ("mbeas"). Sin normalizar, la
+ * misma persona se veía en mayúsculas o en minúsculas según qué sistema hubiera
+ * aportado el dato, y dos tarjetas contiguas del mismo flujo no parecían del
+ * mismo tipo. Se unifica aquí, en el único punto por el que pasan todos los
+ * nodos —esqueleto y firmas reales—, en vez de en cada origen.
+ */
+function _rotuloPersona(nombre) {
+    return String(nombre ?? "").toUpperCase();
+}
+
+/**
  * Iniciales para el Avatar cuando no hay foto.
  * "María Ricanqui" → "MR" | "mricanqui" → "MR" (dos primeras letras).
  */
@@ -573,7 +596,14 @@ function _aIso(valor) {
 }
 
 /**
- * Fecha de presentación en huso horario de Perú: dd.MM.yyyy HH:mm.
+ * Fecha de presentación en la convención peruana: dd/MM/yyyy HH:mm.
+ *
+ * La HORA es siempre la de Lima, no la del servidor. Importa: en Cloud Foundry
+ * el proceso corre en UTC, así que sin fijar la zona una firma de las 23:40 de
+ * Lima se mostraría como del día siguiente. ECP graba en hora de Perú y
+ * _fechaEcpAIso le pone el -05:00 al leerla; aquí se cierra el círculo
+ * volviendo a esa misma zona para presentarla.
+ *
  * Se formatea en CAP y no en el frontend para que el texto del nodo sea idéntico
  * en la app, en un export y en cualquier consumidor futuro del mismo OData.
  */
@@ -588,7 +618,7 @@ function _formatearFecha(valor) {
         hour: "2-digit", minute: "2-digit", hour12: false,
     }).formatToParts(fecha).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
 
-    return `${partes.day}.${partes.month}.${partes.year} ${partes.hour}:${partes.minute}`;
+    return `${partes.day}/${partes.month}/${partes.year} ${partes.hour}:${partes.minute}`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -596,15 +626,22 @@ function _formatearFecha(valor) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Nivel del diagrama en el que está cada rol del flujo H2H vigente.
+ * Nivel del diagrama en el que está cada rol del flujo H2H vigente:
+ *
+ *   1 Analista  →  2 Coordinador  →  3 Apoderados  →  4 Liberador
+ *
  * Coincide con PERFIL_PAYROLL: es el mismo diagrama visto desde el otro lado.
+ *
+ * `coordinador` figura aunque su tarea siga anulada en BPA desde v1.1.0: si el
+ * flujo volviera a activarla, su nivel ya está donde le corresponde y el
+ * esqueleto no la haría caer en la columna de apoderados por defecto.
  *
  * Todos los apoderados comparten nivel: en BPA son un POOL sobre una única
  * tarea (quórum de 2 firmas desde v1.2.0), así que el diagrama los muestra
  * como columna de N tarjetas que converge en el liberador.
  */
-const NIVEL_POR_ROL = { apoderado: 2, liberador: 3 };
-const NIVEL_POR_DEFECTO = 2;   // sin tarea identificable, se asume en apoderados
+const NIVEL_POR_ROL = { coordinador: 2, apoderado: 3, liberador: 4 };
+const NIVEL_POR_DEFECTO = 3;   // sin tarea identificable, se asume en apoderados
 
 /**
  * La forma que el flujo VA a tener, EN EL MISMO FORMATO CRUDO que produce
@@ -621,11 +658,11 @@ const NIVEL_POR_DEFECTO = 2;   // sin tarea identificable, se asume en apoderado
  * ── Aquí NO se inventa un solo dato ──────────────────────────────────────────
  *
  * Los únicos usuarios que se pintan son los que la propuesta trae de Payroll
- * (quién registró el lote, quién es el liberador designado). Un nodo del que no
- * se sabe la persona sale con su rol y su estado y SIN nombre: la tarjeta
- * muestra el ícono genérico, "Apoderado" y "Pendiente", que es exactamente lo
- * que se sabe de él. Rellenarlo con un candidato del pool o con un nombre de
- * ejemplo haría pasar por dato lo que es una suposición.
+ * (quién registró el lote, y el liberador designado cuando es UNO SOLO). Un nodo
+ * del que no se sabe la persona sale con su rol y su estado y SIN nombre: la
+ * tarjeta muestra el ícono genérico, "Apoderado" y "Pendiente", que es
+ * exactamente lo que se sabe de él. Rellenarlo con un candidato del pool o con un
+ * nombre de ejemplo haría pasar por dato lo que es una suposición.
  *
  * ── Los estados NO son fijos ─────────────────────────────────────────────────
  *
@@ -686,7 +723,7 @@ function filasEsperadas(propuesta, activityId, requeridas, firmantes = []) {
         const correo = firmantes[indice];
         return correo
             ? {
-                Nivel: 2, Orden: indice + 1,
+                Nivel: 3, Orden: indice + 1,
                 Usuario: correo,
                 Nombre : _nombreDesdeCorreo(correo),
                 Cargo  : "Apoderado",
@@ -699,22 +736,48 @@ function filasEsperadas(propuesta, activityId, requeridas, firmantes = []) {
                 FotoUrl: "",
             }
             : {
-                Nivel: 2, Orden: indice + 1,
+                Nivel: 3, Orden: indice + 1,
                 Usuario: "",
                 Nombre : "",
                 Cargo  : "Apoderado",
                 Perfil : "AP",
-                Decision: decision(2, "APROBADO"),
+                Decision: decision(3, "APROBADO"),
                 Comentario: "",
                 FechaAccion: "",
                 FotoUrl: "",
             };
     });
 
-    // Analista y liberador SÍ llevan usuario: no es una suposición, es lo que
-    // Payroll dejó en la propuesta al arrancar el flujo. Si la propuesta no lo
-    // trae, el nodo se queda sin persona en vez de rellenarse con un ejemplo.
-    const analista = p.usuarioCreacionPP || p.analista || "";
+    // El analista SÍ lleva usuario: no es una suposición, es lo que Payroll dejó
+    // en la propuesta al arrancar el flujo. Si la propuesta no lo trae, el nodo
+    // se queda sin persona en vez de rellenarse con un ejemplo.
+    //
+    // Es el usuario CREADOR de la propuesta —quien la armó en Payroll—, que es
+    // lo que el nivel 1 representa. `analista` queda de respaldo: es el mismo
+    // dato en los contextos que lo traen consolidado, y sin él la tarjeta se
+    // quedaría sin persona en propuestas antiguas.
+    const analista = p.usuarioCreacion || p.analista || p.correoAnalista || "";
+
+    // El coordinador del diagrama es el REVISOR de la propuesta ("Revisado por"
+    // en Payroll, DataType 1.4.8). Su paso no es una tarea de BPA —la del
+    // coordinador está anulada desde v1.1.0— sino un hecho ya ocurrido cuando el
+    // flujo llega a los apoderados, y por eso se pinta siempre resuelto.
+    const revisor = p.usuarioRevisor || "";
+
+    // El nivel 3 es UN nodo aunque haya VARIOS liberadores designados —Payroll
+    // puede mandar usuarioLiberador como lista separada por comas—. El paso se
+    // cierra con una sola liberación y ECP lo confirma en un único slot
+    // (Perfil "3" → Nivel 3, Orden 1; ver PERFIL_PAYROLL): una tarjeta por
+    // candidato diría que hacen falta N liberaciones, que es falso, y además
+    // rompería la fusión, que empareja por Nivel+Orden.
+    //
+    // Con un solo designado la tarjeta lleva su nombre, que es un dato. Con
+    // varios no se elige a ninguno —quién liberará no se sabe hasta que lo
+    // haga— y el nodo va sin persona, igual que un slot de apoderado todavía
+    // sin firmar. En cuanto ECP confirme la liberación, _fusionar() pone ahí al
+    // firmante real.
+    const liberadores = perfiles.normalizarUsuarios(p.usuarioLiberador);
+    const liberador   = liberadores.length === 1 ? liberadores[0] : "";
 
     return [
         {
@@ -731,14 +794,30 @@ function filasEsperadas(propuesta, activityId, requeridas, firmantes = []) {
             FechaAccion: "",
             FotoUrl: "",
         },
+        {
+            Nivel: 2, Orden: 1,
+            Usuario: revisor,
+            Nombre : _nombreDesdeCorreo(revisor),
+            Cargo  : "Coordinador",
+            Perfil : "CO",
+            // Siempre resuelto, igual que el analista y por el mismo motivo: la
+            // revisión ocurre en Payroll ANTES de que la propuesta entre al
+            // flujo de firmas, así que si hay tarea que mirar es porque ya pasó.
+            // Su FECHA no la conocemos —ECP no devuelve este paso— y el nodo va
+            // sin ella, como el del analista.
+            Decision: "REVISADO",
+            Comentario: "",
+            FechaAccion: "",
+            FotoUrl: "",
+        },
         ...filasApoderados,
         {
-            Nivel: 3, Orden: 1,
-            Usuario: p.usuarioLiberador ?? "",
-            Nombre : _nombreDesdeCorreo(p.usuarioLiberador),
+            Nivel: 4, Orden: 1,
+            Usuario: liberador,
+            Nombre : _nombreDesdeCorreo(liberador),
             Cargo  : "Liberador Final",
             Perfil : "LI",
-            Decision: decision(3, "LIBERADO"),
+            Decision: decision(4, "LIBERADO"),
             Comentario: "",
             FechaAccion: "",
             FotoUrl: "",

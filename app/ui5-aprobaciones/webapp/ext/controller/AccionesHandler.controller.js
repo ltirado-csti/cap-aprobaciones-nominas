@@ -56,7 +56,7 @@ sap.ui.define([
                 onPageReady: function () {
                     var mIconosPorLabel = {
                         "Aprobar" : "sap-icon://accept",
-                        "Observar": "sap-icon://message-warning"
+                        "Rechazar": "sap-icon://decline"
                     };
 
                     this.getView()
@@ -67,6 +67,7 @@ sap.ui.define([
                             oBoton.setIcon(mIconosPorLabel[oBoton.getText()]);
                         });
 
+                    this._ponerIconoVerPDF();
                     this._observarCierreTrasAccion();
                 },
 
@@ -84,10 +85,41 @@ sap.ui.define([
                 }
             },
 
+            // ─── ICONO DEL BOTON "VER PDF" ────────────────────────────────────
+
+            /**
+             * Pone el icono de PDF al boton "Ver PDF" del header.
+             *
+             * No sale del manifest: las acciones custom (content > header >
+             * actions) NO admiten `icon`. El conversor de sap.fe que las traduce
+             * a botones —core/converters/controls/Common/Action.js,
+             * getActionsFromManifest— copia text, press, visible, enabled,
+             * position, menu y demas, pero nunca lee un icono; los unicos iconos
+             * que pone son los suyos, escritos a fuego para acciones estandar
+             * como exportar o imprimir. De ahi que se asigne aqui, sobre el
+             * boton ya construido.
+             *
+             * Se localiza por ID y no por texto —al contrario que Aprobar y
+             * Rechazar, que vienen de anotaciones— porque una accion custom SI
+             * tiene ID estable: sap.fe le incrusta su clave del manifest
+             * ("...::CustomAction::verPDF"). Es un ancla mejor que el rotulo,
+             * que sale de i18n y cambia con el idioma.
+             */
+            _ponerIconoVerPDF: function () {
+                this.getView()
+                    .findAggregatedObjects(true, function (oControl) {
+                        return oControl.isA("sap.m.Button") &&
+                               oControl.getId().indexOf("verPDF") !== -1;
+                    })
+                    .forEach(function (oBoton) {
+                        oBoton.setIcon("sap-icon://pdf-attachment");
+                    });
+            },
+
             // ─── CIERRE AUTOMATICO TRAS UNA ACCION EXITOSA ────────────────────
 
             /**
-             * Aprobar/Observar/Liberar/Rechazar/Anular tienen Common.SideEffects
+             * Aprobar/Rechazar/Liberar/Anular tienen Common.SideEffects
              * en la anotacion (ver annotations.cds), que ya refresca la coleccion
              * TareasInbox y hace desaparecer la tarea resuelta de "Propuestas de
              * Nómina". Pero eso solo actualiza la lista: el Object Page (columna
@@ -228,11 +260,11 @@ sap.ui.define([
                     });
             },
 
-            // ─── EJECUCION CON DIALOGO (Observar / Rechazar / Anular) ────────
+            // ─── EJECUCION CON DIALOGO (Rechazar / Anular) ───────────────────
 
             /**
              * Solicita comentario antes de ejecutar la accion.
-             * Segun BPA: se requiere justificacion en los casos de observacion / rechazo.
+             * Segun BPA: se requiere justificacion en los casos de rechazo.
              */
             _ejecutarConComentario: function (sActionName, sLabel) {
                 var that     = this;
@@ -357,7 +389,7 @@ sap.ui.define([
             // ─── HANDLERS PUBLICOS ────────────────────────────────────────────
 
             onApoderadoAprobar:  function () { this._ejecutarDirecto("apoderadoAprobar",  "Aprobacion"); },
-            onApoderadoObservar: function () { this._ejecutarConComentario("apoderadoObservar", "Observar"); },
+            onApoderadoRechazar: function () { this._ejecutarConComentario("apoderadoRechazar", "Rechazar"); },
             onLiberadorLiberar:  function () { this._ejecutarDirecto("liberadorLiberar",  "Liberacion"); },
             onLiberadorRechazar: function () { this._ejecutarConComentario("liberadorRechazar", "Rechazar"); },
             onLiberadorAnular:   function () { this._ejecutarConComentario("liberadorAnular",   "Anular");   }

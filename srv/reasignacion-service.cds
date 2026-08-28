@@ -110,13 +110,14 @@ service ReasignacionService @(path: '/nomina/reasignacion') {
     // =========================================================================
     // Composición: Firmante — una PERSONA del flujo de la propuesta
     //
-    // Una fila por cada apoderado de la lista más una para el liberador, exista
-    // o no su tarea. Esa es la razón de `reasignable`: BPA crea la instancia de
-    // tarea cuando el token del flujo llega a ella, así que el liberador de una
-    // propuesta que está en firma de apoderados TODAVÍA NO TIENE TAREA que
-    // reasignar; y un apoderado que ya firmó tampoco, aunque la tarea siga viva
-    // para sus compañeros. Se muestran igualmente para que el administrador vea
-    // el flujo completo, con el botón inactivo y el porqué en motivoNoReasignable.
+    // Una fila por cada persona designada en el flujo —cada apoderado de la
+    // lista y cada liberador de la suya—, exista o no su tarea. Esa es la razón
+    // de `reasignable`: BPA crea la instancia de tarea cuando el token del flujo
+    // llega a ella, así que los liberadores de una propuesta que está en firma de
+    // apoderados TODAVÍA NO TIENEN TAREA que reasignar; y un apoderado que ya
+    // firmó tampoco, aunque la tarea siga viva para sus compañeros. Se muestran
+    // igualmente para que el administrador vea el flujo completo, con el botón
+    // inactivo y el porqué en motivoNoReasignable.
     // =========================================================================
     @readonly
     @cds.persistence.skip
@@ -124,9 +125,11 @@ service ReasignacionService @(path: '/nomina/reasignacion') {
         key propuestaID          : String(60);
 
         // Clave de la fila. El rol dejó de servir como clave con el quórum:
-        // un mismo rol ('Apoderado') tiene ahora N personas a la vez. Para el
-        // pool es 'apoderado#<correo>'; para el liberador, 'liberador'.
-        // Es lo que permite a la acción saber A QUIÉN está sustituyendo.
+        // un mismo rol ('Apoderado') tiene ahora N personas a la vez, y el
+        // liberador también desde que Payroll puede designar varios. Es
+        // '<rol>#<correo>' —'apoderado#a@x.net', 'liberador#b@x.net'—, que es lo
+        // que permite a la acción saber A QUIÉN está sustituyendo. Solo la fila
+        // de un rol del que aún no se conoce a nadie lleva el rol a secas.
         key firmanteID           : String(150);
 
         // Rol para mostrar — 'Apoderado' | 'Liberador Final'. Se repite en
@@ -137,9 +140,9 @@ service ReasignacionService @(path: '/nomina/reasignacion') {
         // Ordena la tabla sin depender del alfabeto del rol.
         nivel                    : Integer;
 
-        // La persona de esta fila. Con tarea viva de un rol de un solo
-        // destinatario manda recipientUsers[0] de BPA —refleja reasignaciones
-        // ya hechas—; en el pool, cada fila es un miembro de la lista.
+        // La persona de esta fila: un miembro de la lista de su rol. Con tarea
+        // viva la lista son los recipientUsers de BPA —así se reflejan las
+        // reasignaciones ya hechas—; sin ella, la del contexto de la propuesta.
         usuario                  : String(100);
 
         // 'Pendiente' | 'Reservada' | 'Firmado' | 'No iniciado'
@@ -147,7 +150,8 @@ service ReasignacionService @(path: '/nomina/reasignacion') {
         estadoCriticidad         : Integer;
 
         // Estado del quórum al que pertenece esta firma. En el liberador van a
-        // cero: su paso no tiene quórum, es una única aprobación.
+        // cero: su paso no tiene quórum —es una única liberación— por muchos
+        // destinatarios que tenga la tarea.
         contadorFirmas           : Integer;
         firmasRequeridas         : Integer;
 
@@ -203,8 +207,8 @@ service ReasignacionService @(path: '/nomina/reasignacion') {
         decision            : String(30);
         decisionTexto       : String(60);
         comentario          : String(500);
-        fechaAccion         : String(30);
-        fechaTexto          : String(30);
+        fechaAccion         : String(30);       // ISO 8601 — trazabilidad y orden
+        fechaTexto          : String(30);       // dd/MM/yyyy HH:mm en hora de Perú — presentación
         estadoNodo          : String(20);
         estadoTexto         : String(60);
         decisionValueState  : String(10);
@@ -294,7 +298,7 @@ service ReasignacionService @(path: '/nomina/reasignacion') {
         usuariosApoderados       : String(1000);   // lista completa
         apoderadosFirmantes      : String(1000);   // los que ya firmaron
         apoderadosPendientes     : String(1000);   // los que aún pueden firmar
-        usuarioLiberador         : String(100);
+        usuarioLiberador         : String(1000);   // uno o varios liberadores
 
         // Estado del quórum de la propuesta a la que pertenece esta tarea.
         contadorFirmas           : Integer;

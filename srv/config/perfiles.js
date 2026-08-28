@@ -37,7 +37,7 @@
  *
  * Roles activos:
  *   AP  →  form_aprobacionDelApoderado_1   (pool de N, quórum de 2)
- *   LI  →  form_aprobacionLiberadorFinal_1
+ *   LI  →  form_aprobacionLiberadorFinal_1 (pool de N, una sola liberación)
  *
  * Roles retenidos fuera del flujo:
  *   CO  →  form_aprobacionDelCoordinador_2 (anulado desde v1.1.0)
@@ -123,7 +123,7 @@ const ROLES_BPA = {
      * Apoderado — tarea única con POOL de destinatarios y quórum de 2 firmas.
      *
      * Contexto: startEvent.body (subproceso aprobacionDeLosApoderados).
-     * Decisiones válidas: aprobar | observar.
+     * Decisiones válidas: aprobar | rechazar.
      * Destinatarios en BPA: context.custom.apoderadospendientes (CSV).
      *
      * `campoPropuesta` es la lista ORIGINAL que Payroll dejó en el contexto al
@@ -133,7 +133,7 @@ const ROLES_BPA = {
      */
     apoderado: {
         taskDefinitionId: "form_aprobacionDelApoderado_1",
-        decisiones      : ["aprobar", "observar"],
+        decisiones      : ["aprobar", "rechazar"],
         contextPath     : "startEvent.body",
         codigoLane      : "AP",
         perfilPayroll   : null,          // lo calcula BPA (custom.perfilfirma)
@@ -154,8 +154,9 @@ const ROLES_BPA = {
         campoFlagNotif   : "flagerrornotifapo1",
         campoMensajeNotif: "mensajenotifapo1",
 
-        // El pool es lo que distingue a este rol del liberador en todo el
-        // proyecto: N destinatarios posibles y M firmas necesarias.
+        // Los dos roles activos son pools de N destinatarios; lo que distingue a
+        // este es el QUÓRUM: M firmas necesarias y un registro en BPA que
+        // recalcula la lista en cada una (los campos custom de aquí arriba).
         esPool          : true,
         firmasPorDefecto: 2,             // respaldo si custom.firmasrequeridas no llegó
 
@@ -167,7 +168,26 @@ const ROLES_BPA = {
      * Liberador Final — proceso principal (aprobacionDeNomina).
      * Contexto: startEvent.propuesta (proceso raíz, no subproceso).
      * Decisiones válidas: liberar | rechazar | anular.
-     * Destinatario en BPA: startEvent.propuesta.usuarioLiberador (uno solo).
+     * Destinatarios en BPA: startEvent.propuesta.usuarioLiberador (CSV).
+     *
+     * TAMBIÉN ES UN POOL, y por eso `esPool` está en true: Payroll puede dejar
+     * VARIOS correos separados por comas en ese campo, y BPA los reparte como
+     * destinatarios de una sola tarea igual que hace con los apoderados —
+     * recipientUsers es un CSV en su API (ver infrastructure/bpa-client.js).
+     *
+     * EN QUÉ SE DIFERENCIA DEL POOL DE APODERADOS
+     * -------------------------------------------
+     * En que NO hay quórum ni registro de firmas: basta UNA liberación y el
+     * flujo avanza, así que el BPMN no recalcula la lista en ninguna variable
+     * de context.custom. De ahí que este rol no declare campoPendientes,
+     * campoFirmantes, campoContador ni campoRequeridas: su lista de
+     * destinatarios vive SIEMPRE en el campo de la propuesta y solo cambia
+     * cuando la reasignación la reescribe ahí (ver
+     * domain/reasignacion.service.js → _persistirEnContexto).
+     *
+     * La ausencia de campoPendientes es justamente lo que distingue a los dos
+     * pools en el código: resolverDestinatarios() la usa para decidir si la
+     * lista buena la lleva BPA o la propuesta.
      */
     liberador: {
         taskDefinitionId: "form_aprobacionLiberadorFinal_1",
@@ -180,7 +200,10 @@ const ROLES_BPA = {
         // (aprobacionDeNomina), no del subproceso de Apoderados.
         campoFlagNotif   : "flagerrornotifliberador",
         campoMensajeNotif: "mensajenotifliberador",
-        esPool          : false,
+        esPool          : true,
+        // Una sola liberación cierra el paso. No hay variable de quórum que
+        // consultar: este número no sale del contexto, es la definición del rol.
+        firmasPorDefecto: 1,
         label           : "Liberador Final",
         activo          : true,
     },
@@ -246,28 +269,82 @@ function normalizarUsuarios(lista) {
 }
 
 /**
- * Los apoderados que TODAVÍA pueden firmar, y los que ya firmaron.
+ * Normaliza la identidad del usuario autenticado a UN correo comparable.
  *
- * Fuente de verdad, en orden:
- *   1. context.custom.apoderadospendientes — lo que BPA usa como destinatarios.
- *   2. startEvent.body.usuariosApoderados  — la lista original de Payroll, que
- *      es lo único que hay antes de que el script de inicialización corra.
+ * POR QUÉ NO BASTA CON trim().toLowerCase()
+ * -----------------------------------------
+ * El id del usuario llega del proveedor de identidad y puede traer restos que
+ * no son parte del correo. El caso real que motivó esto: las listas de
+ * apoderados viajan como CSV desde BPA ("a@x,b@x,c@x"), y al copiar un correo
+ * de esa lista para iniciar sesión se arrastra la coma separadora. El id queda
+ * como "arodas@centria.net," y deja de coincidir con "arodas@centria.net" de la
+ * lista de pendientes: el apoderado recibe un 403 pese a estar autorizado.
  *
- * El respaldo importa: entre que el proceso arranca y el Script Task
- * `inicializarApoderados` escribe la variable hay una ventana en la que el
- * contexto solo tiene la lista original. Sin el respaldo, una lectura en esa
- * ventana dejaría el pool vacío y nadie podría firmar.
+ * Se reutiliza normalizarUsuarios porque aplica EXACTAMENTE la misma convención
+ * con la que se normalizan las listas contra las que hay que comparar (partir
+ * por comas, recortar, minúsculas, descartar vacíos). Cualquier otra limpieza
+ * volvería a abrir la puerta a que las dos partes de la comparación se
+ * normalicen distinto, que es de donde salió este fallo.
  *
+ * Se devuelve SOLO la primera entrada, nunca la lista: un id de usuario
+ * identifica a UNA persona. Si llegara con varios correos, aceptar cualquiera
+ * de ellos convertiría un dato sucio en una vía para firmar en nombre de otro.
+ *
+ * @param {string} usuario - identidad del token (req.user.id)
+ * @returns {string} correo normalizado, o "" si no hay ninguno utilizable
+ */
+function normalizarUsuario(usuario) {
+    return normalizarUsuarios(usuario)[0] ?? "";
+}
+
+/**
+ * Quién puede actuar TODAVÍA en la tarea de un rol, y quién ya actuó.
+ *
+ * Sirve para los dos pools del flujo, que se leen de sitios distintos:
+ *
+ *   APODERADOS (BPA lleva la cuenta) — fuente de verdad, en orden:
+ *     1. context.custom.apoderadospendientes — lo que BPA usa como destinatarios.
+ *     2. startEvent.body.usuariosApoderados  — la lista original de Payroll, que
+ *        es lo único que hay antes de que el script de inicialización corra.
+ *
+ *     El respaldo importa: entre que el proceso arranca y el Script Task
+ *     `inicializarApoderados` escribe la variable hay una ventana en la que el
+ *     contexto solo tiene la lista original. Sin el respaldo, una lectura en esa
+ *     ventana dejaría el pool vacío y nadie podría firmar.
+ *
+ *   LIBERADOR (nadie lleva la cuenta) — la lista de la propuesta es TODA la
+ *     verdad: el paso se cierra con una sola liberación, así que el BPMN no
+ *     recalcula nada y no hay variable de pendientes que consultar. Pendientes =
+ *     la lista completa; firmantes = ninguno, porque si alguien hubiera liberado
+ *     el paso habría terminado y esta tarea ya no existiría.
+ *
+ * La rama la decide `campoPendientes`: si el rol no declara esa variable, es que
+ * BPA no lleva el registro. Se mira eso y no `esPool` porque los dos roles SON
+ * pools; lo que los diferencia es quién mantiene la lista.
+ *
+ * @param {object} rolBpa    - entrada de ROLES_BPA (o resolverRolBpa())
  * @param {object} contexto  - contexto BPA completo (con su rama `custom`)
  * @param {object} propuesta - PropuestaNomina ya extraída del contexto
- * @returns {{ pendientes: string[], firmantes: string[], contador: number, requeridas: number }}
+ * @returns {{ originales: string[], pendientes: string[], firmantes: string[],
+ *             contador: number, requeridas: number }}
  */
-function resolverQuorumApoderados(contexto, propuesta) {
-    const rol    = ROLES_BPA.apoderado;
-    const custom = _customEnMinusculas(contexto);
+function resolverDestinatarios(rolBpa, contexto, propuesta) {
+    const rol = rolBpa ?? ROLES_BPA.apoderado;
 
     const originales = normalizarUsuarios(propuesta?.[rol.campoPropuesta]);
-    const firmantes  = normalizarUsuarios(custom[rol.campoFirmantes]);
+
+    if (!rol.campoPendientes) {
+        return {
+            originales,
+            pendientes: originales,
+            firmantes : [],
+            contador  : 0,
+            requeridas: rol.firmasPorDefecto ?? 1,
+        };
+    }
+
+    const custom    = _customEnMinusculas(contexto);
+    const firmantes = normalizarUsuarios(custom[rol.campoFirmantes]);
 
     const pendientesBpa = normalizarUsuarios(custom[rol.campoPendientes]);
     const pendientes    = pendientesBpa.length
@@ -281,21 +358,44 @@ function resolverQuorumApoderados(contexto, propuesta) {
 }
 
 /**
- * ¿Puede este usuario firmar como apoderado en esta propuesta?
+ * El quórum de apoderados — resolverDestinatarios() fijado a ese rol.
+ *
+ * Se conserva con nombre propio porque hay tres consumidores que hablan
+ * específicamente del quórum (el diagrama de aprobaciones, los campos "Ya
+ * firmaron / Pendientes" del Object Page y la cabecera de la propuesta en
+ * reasignación) y leerían peor con el rol como argumento.
+ */
+function resolverQuorumApoderados(contexto, propuesta) {
+    return resolverDestinatarios(ROLES_BPA.apoderado, contexto, propuesta);
+}
+
+/**
+ * ¿Puede este usuario actuar sobre la tarea de este rol en esta propuesta?
  *
  * Se comprueba contra los PENDIENTES y no contra la lista original: un apoderado
  * que ya firmó sale del pool en BPA, y CAP no puede permitirle una segunda firma
- * aunque su correo siga en `usuariosApoderados`.
+ * aunque su correo siga en `usuariosApoderados`. En el liberador las dos listas
+ * coinciden —nadie ha liberado mientras la tarea siga viva— y la comprobación
+ * equivale a "estar en usuarioLiberador".
+ *
+ * FALLA CERRADO: si la lista no se puede resolver, la respuesta es NO. Es la
+ * postura que ya tenía el pool de apoderados y el motivo por el que la
+ * reasignación escribe SIEMPRE la lista nueva en el contexto — si solo tocara
+ * los destinatarios de la tarea, el sustituto vería la tarea y aquí se llevaría
+ * un 403 (ver domain/reasignacion.service.js → _persistirEnContexto).
  *
  * @param {string} usuario   - req.user.id (token XSUAA, nunca del cliente)
  * @param {object} contexto  - contexto BPA completo
  * @param {object} propuesta - PropuestaNomina extraída del contexto
+ * @param {object} rolBpa    - rol de la tarea (resolverRolBpa())
  * @returns {boolean}
  */
-function esApoderadoAutorizado(usuario, contexto, propuesta) {
-    const correo = String(usuario ?? "").trim().toLowerCase();
+function esDestinatarioAutorizado(usuario, contexto, propuesta, rolBpa) {
+    // normalizarUsuario y no trim(): el id puede arrastrar la coma separadora
+    // de la lista CSV de destinatarios. Ver normalizarUsuario.
+    const correo = normalizarUsuario(usuario);
     if (!correo) return false;
-    return resolverQuorumApoderados(contexto, propuesta).pendientes.includes(correo);
+    return resolverDestinatarios(rolBpa, contexto, propuesta).pendientes.includes(correo);
 }
 
 /**
@@ -484,8 +584,10 @@ module.exports = {
     resolverCamposNotificacion,
     esDecisionValida,
 
-    // Quórum de apoderados
+    // Destinatarios de un rol (los dos pools) y quórum de apoderados
     normalizarUsuarios,
+    normalizarUsuario,
+    resolverDestinatarios,
     resolverQuorumApoderados,
-    esApoderadoAutorizado,
+    esDestinatarioAutorizado,
 };

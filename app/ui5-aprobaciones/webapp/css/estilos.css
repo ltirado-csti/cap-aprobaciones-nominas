@@ -1,0 +1,38 @@
+/**
+ * app/ui5-aprobaciones/webapp/css/estilos.css
+ *
+ * Hoja de estilos de la app. Se registra en manifest.json bajo
+ *   sap.ui5 > resources > css
+ * y solo contiene lo que no se puede resolver con las clases estándar de UI5.
+ *
+ * Regla de oro: aquí NO se estilan controles ajenos por su clase interna
+ * (.sapSuiteUiCommons*, .sapMList*, …). Esas clases son detalle de
+ * implementación de la librería y cambian entre versiones sin aviso. Todo lo de
+ * este fichero se aplica a través de una clase PROPIA que el control recibe con
+ * el atributo `class` en el fragmento, que sí es API pública.
+ */
+
+/* ─── Diagrama de flujo del historial de aprobaciones ──────────────────────
+ *
+ * El ProcessFlow se dibuja como una tabla que ocupa solo lo que necesita, así
+ * que en un contenedor ancho queda pegado a la izquierda con un hueco a la
+ * derecha. Se centra con márgenes automáticos y NO con alineación flex del
+ * contenedor: un hijo centrado con `align-items` queda recortado por la
+ * izquierda en cuanto es más ancho que su caja, y esa parte ya no se alcanza
+ * con la barra de desplazamiento. Con márgenes automáticos el diagrama se
+ * centra mientras cabe y, cuando el zoom lo hace más grande, los márgenes
+ * pasan a cero y el scroll del contenedor llega hasta el borde.
+ */
+.h2hFlujoCentrado {
+    margin-left: auto;
+    margin-right: auto;
+}
+
+/* Contenedor del diagrama. El ProcessFlow va con scrollable="false" —dibuja a
+ * altura completa y deja el desplazamiento al padre—, así que es aquí donde hay
+ * que permitir el scroll horizontal. Sin esto, acercar el zoom en la columna
+ * estrecha del FCL recortaría el diagrama sin forma de ver el resto.
+ */
+.h2hFlujoDesplazable {
+    overflow-x: auto;
+}

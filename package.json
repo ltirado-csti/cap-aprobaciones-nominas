@@ -38,6 +38,9 @@
     "historial": {
       "origen": "cpi"
     },
+    "odata": {
+      "max_batch_parallelization": 4
+    },
     "requires": {
       "auth": "dummy",
       "destinations": true,

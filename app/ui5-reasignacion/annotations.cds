@@ -199,16 +199,16 @@ annotate ReasignacionService.Firmante actions {
                  // OperationAvailable aquí arriba—. Con `_it` la anotación
                  // compila igual y no refresca nada.
                  //
-                 // TargetProperties cubre la fila reasignada, que es el caso del
-                 // Liberador Final: su clave (firmanteID = 'liberador') no cambia
-                 // al reasignar, solo cambia quién es el destinatario.
+                 // TargetProperties cubre las columnas de la propia fila, que es
+                 // lo que basta cuando la reasignación no cambia su clave.
                  //
-                 // TargetEntities cubre lo que TargetProperties no puede: en el
-                 // pool de apoderados la clave de la fila ES el correo
-                 // (apoderado#<correo>), así que reasignar no modifica una fila
-                 // sino que borra una y crea otra — hay que releer la colección
-                 // entera. Y NivelFlujo/NodoFlujo son el diagrama de flujo, que
-                 // se compone de los mismos firmantes y quedaba igual de obsoleto.
+                 // TargetEntities cubre lo que TargetProperties no puede: en los
+                 // dos roles la clave de la fila incluye el correo
+                 // ('apoderado#<correo>', 'liberador#<correo>'), así que
+                 // reasignar no modifica una fila sino que borra una y crea otra
+                 // — hay que releer la colección entera. Y NivelFlujo/NodoFlujo
+                 // son el diagrama de flujo, que se compone de los mismos
+                 // firmantes y quedaba igual de obsoleto.
                  // PropuestasEnCurso entra porque su columna "Destinatario" es la
                  // lista de destinatarios vivos de la propuesta.
                  Common.SideEffects: {

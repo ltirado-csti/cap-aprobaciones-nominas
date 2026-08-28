@@ -6,10 +6,13 @@
  *
  * Fuentes de datos reales (verificadas en código fuente UI5):
  *
- *   PDF propuesta   → SAP Gateway /WfObtenerPDFH2HSet → campo Docum (base64)
- *                     Equivale a: oPPOData.getPropuestaPDFSAP() + showPDF() en Detail.controller.js
- *                     El UI5 renderiza con pdf.js (PDFDialog.js / PDFDialogUrl.js)
- *                     CAP retorna el mismo base64 que SAP Gateway devuelve.
+ *   PDF propuesta   → CPI (iFlow pendiente de publicar) → base64
+ *                     En este proyecto TODO lo que viene de SAP entra por Cloud
+ *                     Integration. La app UI5 anterior llamaba directamente a
+ *                     /WfObtenerPDFH2HSet de Gateway (oPPOData.getPropuestaPDFSAP()),
+ *                     y de ahí venía este handler; ese canal directo ya no aplica.
+ *                     El PDF que consume la app de aprobaciones lo sirve
+ *                     PagosService.PropuestaPDF, no este servicio.
  *
  *   PDF aprobaciones → HANA /PropuestaPagoAprobadores → pdfkit server-side
  *
@@ -24,18 +27,20 @@ const LOG  = cds.log("utils-service");
 
 module.exports = cds.service.impl(async function (srv) {
 
-  // ── PDF: PROPUESTA (desde SAP Gateway) ─────────────────────────────────────
+  // ── PDF: PROPUESTA ─────────────────────────────────────────────────────────
 
   /**
-   * Obtiene el PDF de la propuesta desde SAP Gateway /WfObtenerPDFH2HSet.
-   * El campo Docum contiene el base64 del PDF generado por SAP.
+   * Obtiene el PDF de la propuesta generado por SAP.
    *
-   * Equivale a: oPPOData.getPropuestaPDFSAP(oPropuestaPago) en Detail.controller.js
-   * → luego showPDF() lo renderiza con pdf.js en el canvas
-   * → onDownloadPDF() lo descarga con linkSource = data:application/pdf;base64,...
+   * ⚠ CÓDIGO LEGADO, NO OPERATIVO. Llama a un cliente `gw` que no existe en
+   * ningún módulo de este proyecto: cualquier invocación termina en
+   * ReferenceError. Se conserva como referencia de los campos que SAP necesita
+   * para localizar el documento (NroPP, Sociedad, FechaPP, Banco).
    *
-   * CAP actúa como proxy: UI5 llama a CAP, CAP llama a SAP Gateway,
-   * retorna el base64 al UI5 que ya sabe cómo descargarlo.
+   * Y el canal que asume ya no es el del proyecto: venía de la app UI5 anterior,
+   * que llamaba directamente a Gateway /WfObtenerPDFH2HSet. Aquí toda la
+   * comunicación con SAP pasa por CPI, así que el PDF llegará por un iFlow —ver
+   * el aviso de handle_pdf() en pagos-service.js, que es donde vive el visor.
    */
   srv.on("obtenerPDFPropuesta", async (req) => {
     const { NroPP, Sociedad, FechaPP, Banco } = req.data;

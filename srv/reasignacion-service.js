@@ -80,15 +80,32 @@ const CRITICIDAD_POR_LABEL = Object.fromEntries(
 /**
  * Los roles del flujo, en el orden en que firman.
  *
- * `nivel` es la coordenada del diagrama: los apoderados ocupan el nivel 2 y el
- * liberador el 3. Coincide con NIVEL_POR_ROL de domain/historial.service.js —
- * es el mismo flujo visto desde las dos apps.
+ * `nivel` es la coordenada del diagrama de ESTA app: analista 1, apoderados 2,
+ * liberador 3. Es una numeración propia y basta con que sea correlativa — los
+ * lanes se rotulan por `codigoLane` (AN/AP/LI) y no por el número, y las aristas
+ * las deriva histSvc._enlazarNodos de los niveles distintos que encuentre.
+ *
+ * NO coincide con NIVEL_POR_ROL de domain/historial.service.js: el historial de
+ * aprobaciones intercala el paso del coordinador (analista 1, coordinador 2,
+ * apoderados 3, liberador 4), que aquí no se dibuja porque no hay tarea que
+ * reasignar en él.
  *
  * DESDE BPA v1.2.0 SON DOS ENTRADAS, NO TRES. Los apoderados dejaron de ser dos
  * roles con un usuario cada uno para ser UN rol con una lista de N usuarios
- * equivalentes y quórum de dos firmas (ver config/perfiles.js). Por eso el rol
- * de apoderado se marca `esPool`: cada uno de sus miembros produce su propia
- * fila de firmante, mientras que el liberador produce siempre una sola.
+ * equivalentes y quórum de dos firmas (ver config/perfiles.js).
+ *
+ * LOS DOS SON POOLES. El liberador también: Payroll puede dejar varios correos
+ * separados por comas en usuarioLiberador y BPA los reparte como destinatarios
+ * de una sola tarea. Cada miembro de cualquiera de las dos listas produce su
+ * propia fila de firmante, con su estado y su botón.
+ *
+ * `campoPool` y `campoFirmados` dicen DE QUÉ CAMPO de la fila de la tarea sale
+ * la lista de cada rol, que es lo único que los diferencia aquí: BPA lleva la
+ * cuenta del pool de apoderados (poolPendientes / poolFirmantes, recalculados en
+ * cada firma) y no lleva ninguna del liberador (poolLiberadores, la lista de la
+ * propuesta). `campoFirmados` en null no es un hueco: significa "de este rol no
+ * hay firmas registradas", y de ahí cuelgan el estado sin tarea y los contadores
+ * (ver _construirFirmantes y _sinTarea).
  *
  * `label` y `campoPropuesta` NO se repiten aquí: salen de config/perfiles.js,
  * que es la fuente de verdad. `campoPropuesta` es justo lo que hace posible
@@ -96,8 +113,8 @@ const CRITICIDAD_POR_LABEL = Object.fromEntries(
  * Payroll dejó su correo (o su lista) al arrancar el flujo.
  */
 const ROLES_FLUJO = [
-  { clave: "apoderado", nivel: 2 },
-  { clave: "liberador", nivel: 3 },
+  { clave: "apoderado", nivel: 2, campoPool: "poolPendientes", campoFirmados: "poolFirmantes" },
+  { clave: "liberador", nivel: 3, campoPool: "poolLiberadores", campoFirmados: null },
 ].map(entrada => {
   const rol = perfiles.ROLES_BPA[entrada.clave];
   return {
@@ -429,6 +446,15 @@ function _formatearImporte(importe, moneda) {
 
   const codigo = String(moneda ?? "").trim().toUpperCase() || "PEN";
 
+  // "$" en vez del "US$" que da Intl para dólares — pedido de negocio.
+  if (codigo === "USD") {
+    const numero = new Intl.NumberFormat("es-PE", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(valor);
+    return `$ ${numero}`;
+  }
+
   try {
     return new Intl.NumberFormat("es-PE", {
       style: "currency",
@@ -563,9 +589,9 @@ function _construirPropuesta(propuestaID, tareas) {
     .map(rol => rol.nivel);
   const nivelMinVivo = nivelesVivos.length ? Math.min(...nivelesVivos) : Number.POSITIVE_INFINITY;
 
-  // flatMap y no map: el rol de apoderado es un POOL y produce una fila por
-  // miembro de la lista, no una sola. Cada fila es una persona con su propio
-  // estado —firmó o no— y su propio botón de reasignar.
+  // flatMap y no map: los dos roles son POOLES y producen una fila por miembro
+  // de su lista, no una sola. Cada fila es una persona con su propio estado
+  // —firmó o no— y su propio botón de reasignar.
   const firmantes = ROLES_FLUJO.flatMap(rol =>
     _construirFirmantes(propuestaID, rol, tareaPorRol.get(rol.label), referencia, nivelMinVivo));
 
@@ -672,19 +698,32 @@ async function _buscarFirmante(propuestaID, firmanteID) {
 /**
  * Las filas de firmante que produce un rol del flujo.
  *
- * Devuelve un array porque el rol de apoderado es un POOL: cada miembro de la
- * lista es una persona distinta, con su propio estado y su propio botón. El
- * liberador devuelve siempre una sola fila.
+ * Devuelve un array porque los DOS roles activos son POOLES: cada miembro de la
+ * lista es una persona distinta, con su propio estado y su propio botón. Los
+ * apoderados lo son por el quórum de v1.2.0; el liberador, desde que Payroll
+ * puede dejar varios correos separados por comas en usuarioLiberador. Un rol con
+ * un único destinatario no es un caso aparte sino un pool de uno, y por eso ya
+ * no hay una segunda función para él: la que había producía filas con clave y
+ * estados distintos, y esa divergencia era justo la que dejaba al segundo
+ * liberador sin fila que reasignar.
+ *
+ * DE DÓNDE SALE LA LISTA DE CADA ROL
+ * ----------------------------------
+ * De los campos que ROLES_FLUJO nombra —`campoPool` y `campoFirmados`—, que
+ * apuntan a lo que _mapearTarea dejó en la fila de la tarea. Son distintos
+ * porque BPA solo lleva la cuenta de uno de los dos pools:
+ *
+ *   apoderados → poolPendientes / poolFirmantes, que el BPMN recalcula en cada
+ *                firma (context.custom.*).
+ *   liberador  → poolLiberadores, la lista que Payroll dejó en la propuesta. Sin
+ *                lista de firmados: una sola liberación cierra el paso, así que
+ *                mientras la tarea siga viva nadie ha liberado.
  */
 function _construirFirmantes(propuestaID, rol, tarea, referencia, nivelMinVivo) {
-  if (!rol.esPool) {
-    return [_construirFirmanteUnico(propuestaID, rol, tarea, referencia, nivelMinVivo)];
-  }
+  const firmantes  = rol.campoFirmados ? (referencia[rol.campoFirmados] ?? []) : [];
+  const pendientes = referencia[rol.campoPool] ?? [];
 
-  const firmantes  = referencia.poolFirmantes  ?? [];
-  const pendientes = referencia.poolPendientes ?? [];
-
-  // Sin tarea viva de apoderado el paso ya pasó: nadie de la lista es accionable.
+  // Sin tarea viva del rol el paso ya pasó: nadie de la lista es accionable.
   const enTarea = tarea ? (tarea.destinatariosTarea ?? []) : [];
 
   // Quiénes tienen fila. Las TRES listas hacen falta y por motivos distintos:
@@ -695,7 +734,7 @@ function _construirFirmantes(propuestaID, rol, tarea, referencia, nivelMinVivo) 
   //   enTarea    → los destinatarios REALES de la tarea en BPA. Es la única
   //                lista donde aparece alguien metido por una reasignación:
   //                el PATCH cambia recipientUsers de la tarea, no la variable
-  //                custom.apoderadospendientes de la que salen las otras dos.
+  //                del contexto de la que salen las otras dos.
   //                Omitirlo dejaba al sustituto SIN FILA —la pantalla seguía
   //                mostrando al sustituido como si nada hubiera pasado, que es
   //                justo lo que el administrador acababa de cambiar.
@@ -706,20 +745,25 @@ function _construirFirmantes(propuestaID, rol, tarea, referencia, nivelMinVivo) 
   // orden de la tabla es: primero quien firmó, luego quien puede firmar ahora.
   const todos = perfiles.normalizarUsuarios([...firmantes, ...enTarea, ...pendientes]);
 
-  return todos.map(correo => {
+  // Sin nadie identificable se conserva UNA fila sin persona: el paso existe en
+  // el flujo aunque el contexto todavía no diga quién lo hará, y la tabla no
+  // debe perder el nivel. Es el caso de una propuesta sin usuarioLiberador.
+  const personas = todos.length ? todos : [""];
+
+  return personas.map(correo => {
     const yaFirmo = firmantes.includes(correo);
 
-    // Con la tarea de apoderados VIVA, todo el que no haya firmado tiene aún una
-    // firma pendiente y se puede reasignar. Deliberadamente NO se exige estar en
+    // Con la tarea del rol VIVA, todo el que no haya firmado tiene aún una firma
+    // pendiente y se puede reasignar. Deliberadamente NO se exige estar en
     // enTarea (recipientUsers).
     //
     // Las dos listas divergen en la práctica: recipientUsers se fija al CREAR la
-    // tarea y una reasignación anterior pudo cambiarla, mientras que
-    // custom.apoderadospendientes es la lista que el BPMN recalcula en cada
-    // firma. Un apoderado que esté en la segunda pero no en la primera es
-    // justamente el que MÁS necesita el botón: no ve la tarea en su inbox
-    // —getInboxTasks filtra por recipientUsers— así que no puede firmar, y sin
-    // reasignarlo la propuesta se queda esperando a alguien que no puede actuar.
+    // tarea y una reasignación anterior pudo cambiarla, mientras que la lista
+    // del contexto es la que el BPMN recalcula en cada firma. Un apoderado que
+    // esté en la segunda pero no en la primera es justamente el que MÁS necesita
+    // el botón: no ve la tarea en su inbox —getInboxTasks filtra por
+    // recipientUsers— así que no puede firmar, y sin reasignarlo la propuesta se
+    // queda esperando a alguien que no puede actuar.
     //
     // Marcarlo "No requerido" era doblemente erróneo: ese estado significa que el
     // quórum se cerró sin él, y el quórum no se ha cerrado si la tarea sigue viva.
@@ -729,9 +773,11 @@ function _construirFirmantes(propuestaID, rol, tarea, referencia, nivelMinVivo) 
       propuestaID,
       // Clave única de la fila. El rol por sí solo dejó de identificarla en
       // cuanto un rol pasó a tener N personas; el correo es lo que distingue a
-      // un apoderado de otro y lo que el handler necesita para saber A QUIÉN
-      // está sustituyendo dentro del pool.
-      firmanteID      : `${rol.clave}#${correo}`,
+      // una persona de otra y lo que el handler necesita para saber A QUIÉN
+      // está sustituyendo dentro del pool. La fila sin persona conserva el rol
+      // a secas: no hay correo con el que componer una clave, y esa fila no es
+      // reasignable de todas formas.
+      firmanteID      : correo ? `${rol.clave}#${correo}` : rol.clave,
       rol             : rol.label,
       nivel           : rol.nivel,
       usuario         : correo,
@@ -739,8 +785,11 @@ function _construirFirmantes(propuestaID, rol, tarea, referencia, nivelMinVivo) 
       // se muestra— pero la acción de reasignar la necesita para escribir la
       // variable del contexto de la que BPA saca los destinatarios.
       workflowInstanceId: tarea?.workflowInstanceId ?? "",
-      contadorFirmas  : referencia.contadorFirmas ?? 0,
-      firmasRequeridas: referencia.firmasRequeridas ?? 0,
+      // Solo el pool con quórum tiene contadores que enseñar. En el liberador
+      // van a cero, que es lo que la entidad Firmante documenta: su paso es una
+      // única aprobación, no una cuenta de firmas.
+      contadorFirmas  : rol.campoFirmados ? (referencia.contadorFirmas   ?? 0) : 0,
+      firmasRequeridas: rol.campoFirmados ? (referencia.firmasRequeridas ?? 0) : 0,
     };
 
     if (tieneTarea) {
@@ -755,65 +804,38 @@ function _construirFirmantes(propuestaID, rol, tarea, referencia, nivelMinVivo) 
       };
     }
 
-    // Sin acción posible por una de dos razones: ya firmó, o está en la lista
-    // pero no entre los destinatarios de la tarea — porque el quórum se cerró
-    // sin él, o porque otro administrador ya lo sustituyó. "No iniciado" sería
-    // engañoso: el paso de apoderados sí llegó a ocurrir.
-    const estado = yaFirmo ? ESTADO_SIN_TAREA.FIRMADO : ESTADO_SIN_TAREA.NO_REQUERIDO;
-
     return {
       ...base,
-      estadoFirmante     : estado.texto,
-      estadoCriticidad   : estado.criticidad,
+      ..._sinTarea(rol, yaFirmo, nivelMinVivo),
       instanceID         : "",
       estadoTarea        : "",
       reasignable        : false,
-      motivoNoReasignable: estado.motivo,
     };
   });
 }
 
-/** Un rol de un solo destinatario (liberador), con o sin tarea viva detrás. */
-function _construirFirmanteUnico(propuestaID, rol, tarea, referencia, nivelMinVivo) {
-  const base = {
-    propuestaID,
-    firmanteID      : rol.clave,
-    rol             : rol.label,
-    nivel           : rol.nivel,
-    workflowInstanceId: tarea?.workflowInstanceId ?? "",
-    contadorFirmas  : 0,
-    firmasRequeridas: 0,
-  };
-
-  if (tarea) {
-    return {
-      ...base,
-      // Con tarea viva manda el destinatario de BPA y no el del contexto: si ya
-      // se reasignó antes, el contexto sigue con el firmante original.
-      usuario            : tarea.usuarioActual,
-      estadoFirmante     : DESCRIPCION_ESTADO[tarea.estadoTarea] ?? tarea.estadoTarea ?? "Pendiente",
-      estadoCriticidad   : CRITICIDAD_POR_LABEL[rol.label] ?? CRITICIDAD.NEUTRAL,
-      instanceID         : tarea.instanceID,
-      estadoTarea        : tarea.estadoTarea,
-      reasignable        : true,
-      motivoNoReasignable: "",
-    };
-  }
-
-  // Si su nivel no es posterior al nivel más bajo que aún tiene tarea, es que
-  // le tocó y ya no la tiene: firmó. Si es posterior, aún no le ha llegado.
-  const estado = rol.nivel <= nivelMinVivo
-    ? ESTADO_SIN_TAREA.FIRMADO
-    : ESTADO_SIN_TAREA.NO_INICIADO;
+/**
+ * Estado de una fila cuyo rol NO tiene tarea viva. Se deduce distinto según
+ * quién lleve la cuenta de las firmas, y por eso no vale una sola regla:
+ *
+ *   Con registro en BPA (apoderados) — se sabe con exactitud quién firmó:
+ *     el que firmó sale "Firmado"; el que no, "No requerido", porque el quórum
+ *     se cerró sin él o porque otro administrador ya lo sustituyó.
+ *
+ *   Sin registro (liberador) — hay que deducirlo de la POSICIÓN en el flujo: si
+ *     su nivel no es posterior al nivel más bajo que aún tiene tarea, es que le
+ *     tocó y ya no la tiene, luego firmó; si es posterior, aún no le ha llegado.
+ *     Aplicarle la regla de los apoderados marcaría "No requerido" al liberador
+ *     de una propuesta que todavía está en firma de apoderados.
+ */
+function _sinTarea(rol, yaFirmo, nivelMinVivo) {
+  const estado = rol.campoFirmados
+    ? (yaFirmo ? ESTADO_SIN_TAREA.FIRMADO : ESTADO_SIN_TAREA.NO_REQUERIDO)
+    : (rol.nivel <= nivelMinVivo ? ESTADO_SIN_TAREA.FIRMADO : ESTADO_SIN_TAREA.NO_INICIADO);
 
   return {
-    ...base,
-    usuario            : referencia[rol.campoPropuesta] ?? "",
     estadoFirmante     : estado.texto,
     estadoCriticidad   : estado.criticidad,
-    instanceID         : "",
-    estadoTarea        : "",
-    reasignable        : false,
     motivoNoReasignable: estado.motivo,
   };
 }
@@ -976,9 +998,13 @@ function _conEstadoNivel(tarea) {
 function _conListasTexto(tarea) {
   return {
     ...tarea,
-    usuariosApoderados  : (tarea.poolApoderados ?? []).join(", "),
-    apoderadosFirmantes : (tarea.poolFirmantes  ?? []).join(", "),
-    apoderadosPendientes: (tarea.poolPendientes ?? []).join(", "),
+    usuariosApoderados  : (tarea.poolApoderados  ?? []).join(", "),
+    apoderadosFirmantes : (tarea.poolFirmantes   ?? []).join(", "),
+    apoderadosPendientes: (tarea.poolPendientes  ?? []).join(", "),
+    // Se recompone desde la lista normalizada en vez de reenviar el CSV crudo de
+    // Payroll: así la columna se lee igual que las de apoderados —", " y sin
+    // duplicados— venga uno o vengan cuatro correos.
+    usuarioLiberador    : (tarea.poolLiberadores ?? []).join(", "),
     destinatarios       : (tarea.destinatariosTarea ?? []).join(", "),
     firmasTexto         : tarea.firmasRequeridas
       ? `${tarea.contadorFirmas ?? 0} de ${tarea.firmasRequeridas} firmas`
@@ -1035,14 +1061,20 @@ async function _mapearTarea(tarea, rol) {
   // calcula siempre porque es barato y deja la fila homogénea.
   const quorum = perfiles.resolverQuorumApoderados(contexto, propuesta);
 
-  // Destinatarios REALES de la tarea en BPA. Con el pool de apoderados son
-  // varios; leerlos de recipientUsers y no del contexto es lo que hace que una
-  // reasignación previa se vea reflejada. Si BPA no los devolviera, el pool
-  // pendiente del contexto es el mejor respaldo disponible.
+  // La lista de liberadores, por el mismo motivo: es un dato de la PROPUESTA
+  // —no de esta tarea— y las filas de firmante del nivel 3 se componen desde
+  // cualquiera de las tareas vivas del grupo, sea del rol que sea.
+  const liberadores = perfiles.resolverDestinatarios(
+    perfiles.ROLES_BPA.liberador, contexto, propuesta).pendientes;
+
+  // Destinatarios REALES de la tarea en BPA. En los dos roles pueden ser varios;
+  // leerlos de recipientUsers y no del contexto es lo que hace que una
+  // reasignación previa se vea reflejada. Si BPA no los devolviera, la lista del
+  // contexto para ESTE rol es el mejor respaldo disponible.
   const destinatarios = perfiles.normalizarUsuarios(tarea.recipientUsers);
   const enTarea = destinatarios.length
     ? destinatarios
-    : (rol.esPool ? quorum.pendientes : perfiles.normalizarUsuarios(propuesta[rol.campoPropuesta]));
+    : perfiles.resolverDestinatarios(rol, contexto, propuesta).pendientes;
 
   return {
     instanceID         : tarea.id,
@@ -1074,7 +1106,11 @@ async function _mapearTarea(tarea, rol) {
     poolPendientes     : quorum.pendientes,
     contadorFirmas     : quorum.contador,
     firmasRequeridas   : quorum.requeridas,
-    usuarioLiberador   : propuesta.usuarioLiberador ?? "",
+
+    // Los liberadores designados, ya normalizados a lista. El campo de texto
+    // usuarioLiberador que viaja en TareasEnCurso lo compone _conListasTexto a
+    // partir de este array, igual que las tres listas de apoderados.
+    poolLiberadores    : liberadores,
 
     // Quién registró la propuesta en Payroll. No se muestra como columna: es el
     // primer nodo del diagrama de flujo (nivel 1, "Registrado"), el punto de
@@ -1105,7 +1141,9 @@ function _extraerPropuesta(contexto) {
 
 /**
  * Mock de tareas en curso para poder probar la app de reasignación sin BPA.
- * Cubre los dos roles activos y los dos momentos del quórum de apoderados.
+ * Cubre los dos roles activos, los dos momentos del quórum de apoderados y el
+ * caso que motivó el pool del liberador: DOS correos en usuarioLiberador, que
+ * tienen que salir como dos filas reasignables y dos tarjetas del nivel 3.
  */
 function _getMockTareasEnCurso() {
   const APODERADOS = [
@@ -1114,22 +1152,30 @@ function _getMockTareasEnCurso() {
     "mvargas@centria.net",
   ];
 
+  // Payroll manda esto como "cpanduro@centria.net,jlicetti@centria.net" en un
+  // solo campo; aquí ya va normalizado, que es como lo deja _mapearTarea.
+  const LIBERADORES = [
+    "cpanduro@centria.net",
+    "jlicetti@centria.net",
+  ];
+
   /** Completa una fila del mock con la forma que produce _mapearTarea. */
   const tarea = ({ firmantes = [], ...fila }) => {
     const pendientes = APODERADOS.filter(correo => !firmantes.includes(correo));
     const esApoderado = fila.rolTarea === perfiles.ROLES_BPA.apoderado.label;
+    // Los destinatarios de la tarea son TODA la lista del rol que la tiene: es
+    // lo que devuelve recipientUsers en BPA, en los dos roles.
+    const destinatarios = esApoderado ? pendientes : LIBERADORES;
     return {
       poolApoderados      : APODERADOS,
       poolFirmantes       : firmantes,
       poolPendientes      : pendientes,
+      poolLiberadores     : LIBERADORES,
       contadorFirmas      : firmantes.length,
       firmasRequeridas    : 2,
-      usuarioLiberador    : "cpanduro@centria.net",
       analista            : "mricanqui@centria.net",
-      // Con pool, los destinatarios de la tarea son TODOS los pendientes; el
-      // liberador tiene uno solo. Es lo que devuelve recipientUsers en BPA.
-      destinatariosTarea  : esApoderado ? pendientes : ["cpanduro@centria.net"],
-      usuarioActual       : esApoderado ? pendientes[0] : "cpanduro@centria.net",
+      destinatariosTarea  : destinatarios,
+      usuarioActual       : destinatarios[0],
       ...fila,
     };
   };

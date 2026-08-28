@@ -23,6 +23,8 @@
  */
 
 const cds = require("@sap/cds");
+const { conTimeoutBpa } = require("./con-timeout");
+
 const LOG = cds.log("bpa-client");
 
 // Singleton de conexión al destino BPA_WORKFLOW
@@ -56,7 +58,8 @@ async function getInboxTasks(usuario) {
     "$top"         : "100",
   });
  
-  const tareas = await svc.get(`/task-instances?${parametros.toString()}`);
+  const tareas = await conTimeoutBpa(
+    svc.get(`/task-instances?${parametros.toString()}`), "getInboxTasks");
  
   LOG.info(`getInboxTasks OK | usuario=${usuario} tareas=${tareas?.length ?? 0}`);
   return Array.isArray(tareas) ? tareas : [];
@@ -95,7 +98,8 @@ async function listarTareasEnCurso() {
       "$top"    : "200",
     });
     try {
-      const tareas = await svc.get(`/task-instances?${parametros.toString()}`);
+      const tareas = await conTimeoutBpa(
+        svc.get(`/task-instances?${parametros.toString()}`), `listarTareasEnCurso(${status})`);
       return Array.isArray(tareas) ? tareas : [];
     } catch (error) {
       LOG.error(`listarTareasEnCurso ERROR | status=${status}`, error.message);
@@ -124,7 +128,7 @@ async function listarTareasEnCurso() {
 async function obtenerTarea(taskId) {
   const svc = await getSvc();
   try {
-    const tarea = await svc.get(`/task-instances/${taskId}`);
+    const tarea = await conTimeoutBpa(svc.get(`/task-instances/${taskId}`), "obtenerTarea");
     LOG.info(`obtenerTarea OK | taskId=${taskId}`);
     return tarea;
   } catch (error) {
@@ -157,7 +161,7 @@ async function obtenerTarea(taskId) {
 async function readContext(taskId) {
   const svc = await getSvc();
   try {
-    const contexto = await svc.get(`/task-instances/${taskId}/context`);
+    const contexto = await conTimeoutBpa(svc.get(`/task-instances/${taskId}/context`), "readContext");
     LOG.info(`readContext OK | taskId=${taskId}`);
     return contexto;
   } catch (error) {
@@ -197,11 +201,11 @@ async function readContext(taskId) {
 async function completarTarea(taskId, { decision, contexto }) {
   const svc = await getSvc();
   try {
-    await svc.patch(`/task-instances/${taskId}`, {
+    await conTimeoutBpa(svc.patch(`/task-instances/${taskId}`, {
       status  : "COMPLETED",
       decision,
       context : contexto,
-    });
+    }), "completarTarea");
 
     LOG.info(`completarTarea OK | taskId=${taskId} decision=${decision}`);
     return { success: true, mensaje: "Tarea completada correctamente", status: 200 };
@@ -269,9 +273,9 @@ async function reasignarTarea(taskId, destinatarios) {
     .join(",");
 
   try {
-    await svc.patch(`/task-instances/${taskId}`, {
+    await conTimeoutBpa(svc.patch(`/task-instances/${taskId}`, {
       recipientUsers: lista,
-    });
+    }), "reasignarTarea");
 
     LOG.info(`reasignarTarea OK | taskId=${taskId} destinatarios=${lista}`);
     return { success: true, mensaje: "Tarea reasignada correctamente", status: 200 };
@@ -300,7 +304,7 @@ async function reasignarTarea(taskId, destinatarios) {
 async function leerContextoInstancia(instanceId) {
   const svc = await getSvc();
   try {
-    const contexto = await svc.get(`/workflow-instances/${instanceId}/context`);
+    const contexto = await conTimeoutBpa(svc.get(`/workflow-instances/${instanceId}/context`), "leerContextoInstancia");
     LOG.info(`leerContextoInstancia OK | instanceId=${instanceId}`);
     return contexto;
   } catch (error) {
@@ -344,7 +348,7 @@ async function leerContextoInstancia(instanceId) {
 async function actualizarContextoInstancia(instanceId, parche) {
   const svc = await getSvc();
   try {
-    await svc.patch(`/workflow-instances/${instanceId}/context`, parche);
+    await conTimeoutBpa(svc.patch(`/workflow-instances/${instanceId}/context`, parche), "actualizarContextoInstancia");
     LOG.info(`actualizarContextoInstancia OK | instanceId=${instanceId} claves=${Object.keys(parche).join(",")}`);
     return { success: true, mensaje: "Contexto actualizado correctamente", status: 200 };
   } catch (error) {
@@ -372,10 +376,10 @@ async function actualizarContextoInstancia(instanceId, parche) {
 async function iniciarInstancia(definitionId, contexto) {
   const svc = await getSvc();
   try {
-    const instancia = await svc.post("/workflow-instances", {
+    const instancia = await conTimeoutBpa(svc.post("/workflow-instances", {
       definitionId,
       context: contexto,
-    });
+    }), "iniciarInstancia");
 
     LOG.info(`iniciarInstancia OK | definitionId=${definitionId} instanceId=${instancia?.id}`);
     return {
@@ -405,7 +409,7 @@ async function iniciarInstancia(definitionId, contexto) {
 async function obtenerEstadoInstancia(instanceId) {
   const svc = await getSvc();
   try {
-    const instancia = await svc.get(`/workflow-instances/${instanceId}`);
+    const instancia = await conTimeoutBpa(svc.get(`/workflow-instances/${instanceId}`), "obtenerEstadoInstancia");
     LOG.info(`obtenerEstadoInstancia OK | instanceId=${instanceId} status=${instancia?.status}`);
     return instancia;
   } catch (error) {
@@ -430,7 +434,7 @@ async function obtenerEstadoInstancia(instanceId) {
 async function cerrarFlujo(instanceId) {
   const svc = await getSvc();
   try {
-    await svc.patch(`/workflow-instances/${instanceId}`, { status: "CANCELED" });
+    await conTimeoutBpa(svc.patch(`/workflow-instances/${instanceId}`, { status: "CANCELED" }), "cerrarFlujo");
     LOG.info(`cerrarFlujo OK | instanceId=${instanceId}`);
     return { success: true, mensaje: "Flujo cerrado correctamente" };
   } catch (error) {

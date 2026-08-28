@@ -40,11 +40,12 @@ type PropuestaNomina {
     // Control documental
     existeDocumento        : Boolean;
     contadorFirma          : Integer;
+    cantidad               : Integer;   // Cant. Registros — añadido en el DataType 1.4.8
 
     // Usuarios — strings individuales, sin arrays
     analista               : String;    // email consolidado del analista
     usuarioCreacion        : String;
-    usuarioCreacionPP      : String;
+    usuarioRevisor         : String;    // añadido en el DataType 1.4.8
     correoAnalista         : String;
     usuarioCoordinador     : String;    // reservado para uso futuro
 
@@ -62,7 +63,11 @@ type PropuestaNomina {
     usuarioApoderado1      : String;
     usuarioApoderado2      : String;
 
+    // Uno o VARIOS liberadores, en el mismo formato CSV que usuariosApoderados:
+    // BPA reparte esa lista como destinatarios de la tarea de liberación y basta
+    // una sola liberación para cerrar el paso (ver srv/config/perfiles.js).
     usuarioLiberador       : String;
+
     usuarioCaja            : String;
 
     // Flags de estado (legado — no usados para visibilidad en UI v1.1.0+)
@@ -120,8 +125,13 @@ service PagosService @(path: '/nomina/aprobaciones') {
         importeTexto            : String(30);
         sociedad                : String(10);
         numeroPropuesta         : String(20);
-        fechaPropuestaPago      : String(10);
-        fechaPago               : String(10);
+        // Date (no String): así el filtro de Fiori Elements pinta un DatePicker
+        // con calendario en vez de un campo de texto libre. El contexto BPA ya
+        // entrega estos valores en ISO (yyyy-MM-dd) — ver PropuestaNomina más
+        // arriba — que es exactamente el formato de Edm.Date, así que no hace
+        // falta convertir nada en _extraerPropuesta.
+        fechaPropuestaPago      : Date;
+        fechaPago               : Date;
         estadoTarea             : String(20);       // READY | RESERVED
         workflowInstanceId      : String(255);      // ID del proceso padre
 
@@ -138,10 +148,16 @@ service PagosService @(path: '/nomina/aprobaciones') {
         indicadorPagoAdelanto   : String(5);
         existeDocumento         : Boolean;
         contadorFirma           : Integer;
+        cantidad                : Integer;          // "Cant. Registros" — DataType 1.4.8
         analista                : String(100);
         usuarioCreacion         : String(100);
+        usuarioRevisor          : String(100);       // "Revisado por" — DataType 1.4.8
         correoAnalista          : String(100);
-        usuarioLiberador        : String(100);
+        // Lista, no un correo: Payroll puede designar varios liberadores y el
+        // servicio la entrega normalizada y separada por ", ". 1000 y no 100 por
+        // el mismo motivo que usuariosApoderados — cuatro correos ya se pasan de
+        // 100 caracteres, y el recorte silencioso dejaría una lista mentirosa.
+        usuarioLiberador        : String(1000);
         usuarioCoordinador      : String(100);      // reservado para uso futuro
         usuarioCaja             : String(100);
         estaAnulado             : Boolean;
@@ -221,22 +237,25 @@ service PagosService @(path: '/nomina/aprobaciones') {
     extend entity TareasInbox with actions {
 
         // Apoderado (pool con quórum de 2) — contexto BPA: startEvent.body
-        // Visibilidad: esApoderado = true | Decisiones: aprobar | observar
+        // Visibilidad: esApoderado = true | Decisiones: aprobar | rechazar
         //
         // Un mismo usuario solo puede aprobar UNA vez: al firmar, BPA lo saca
         // del pool y CAP rechaza (403) a quien ya no está en él. Ver
         // perfiles.esApoderadoAutorizado y aprobacion.service._prepararAccion.
         //
         // Regla de negocio BPA: Aprobar/Liberar NO llevan parámetro → Fiori
-        // Elements los ejecuta directamente. Observar/Rechazar/Anular llevan
+        // Elements los ejecuta directamente. Rechazar/Anular llevan
         // (comentario: String) → FE genera automáticamente el diálogo de
         // parámetro para capturar el motivo antes de invocar la acción.
 
         // El apoderado confirma la propuesta de nómina (ejecución directa)
         action apoderadoAprobar()                     returns AccionResult;
 
-        // El apoderado devuelve la propuesta al analista con una observación
-        action apoderadoObservar(comentario: String) returns AccionResult;
+        // El apoderado rechaza la propuesta y la devuelve al analista con un motivo.
+        // Renombrada desde apoderadoObservar: BPM H2H Nomina 1.5.0 cambió el
+        // outcome del formulario de apoderado de "Observar" a "Rechazar"
+        // (mismo id "rechazar" que espera BPA al completar la tarea).
+        action apoderadoRechazar(comentario: String) returns AccionResult;
 
         // Liberador Final (LI) — contexto BPA: startEvent.propuesta
         // Visibilidad: esLiberador = true | Decisiones: liberar | rechazar | anular
@@ -275,6 +294,44 @@ service PagosService @(path: '/nomina/aprobaciones') {
     entity EstadosPropuesta {
         key estadoPP    : String(50);       // 'Pendiente de Liberación'
             criticidad  : Integer;          // UI.CriticalityType — color del estado
+    };
+
+    // =========================================================================
+    // PropuestaPDF — el documento de la propuesta como entidad media
+    //
+    // Existe para que el frontend tenga una URL que devuelva BYTES: sap.m.PDFViewer
+    // monta un <iframe> sobre ella y el visor nativo del navegador la renderiza.
+    // Por eso NO se modela como función que devuelva base64 — obligaría a armar un
+    // blob en el cliente y a duplicar en memoria un documento que puede pesar MB.
+    //
+    // La clave es la terna que identifica la propuesta en SAP —
+    // '<numeroPropuesta>-<sociedad>-<yyyy-MM-dd>' — y no el instanceID de BPA:
+    // son esos tres campos los que identifican el documento en SAP —y los que
+    // viajarán al iFlow de CPI que lo entrega—, y la misma terna con la que
+    // reasignacion-service.js agrupa tareas (ver _clavePropuesta).
+    // TareasInbox.urlPDF la construye ya armada.
+    //
+    // @Core.MediaType + @Core.ContentDisposition.Type: 'inline' son lo que hace
+    // que el navegador MUESTRE el PDF en vez de descargarlo: con el disposition
+    // por defecto ('attachment') el iframe del visor dispararía una descarga y
+    // quedaría en blanco.
+    // =========================================================================
+    @readonly
+    @cds.persistence.skip
+    entity PropuestaPDF {
+        key id                 : String(120);   // 'R4603-0025-2026-05-20'
+            numeroPropuesta    : String(20);
+            sociedad           : String(10);
+            fechaPropuestaPago : String(10);
+            nombreArchivo      : String(150);
+
+            @Core.IsMediaType
+            mimeType           : String(50);
+
+            @Core.MediaType                 : mimeType
+            @Core.ContentDisposition.Filename: nombreArchivo
+            @Core.ContentDisposition.Type   : 'inline'
+            contenido          : LargeBinary;
     };
 
     // =========================================================================
@@ -374,7 +431,7 @@ service PagosService @(path: '/nomina/aprobaciones') {
         decisionTexto       : String(60);       // texto mostrado al usuario
         comentario          : String(500);
         fechaAccion         : String(30);       // ISO 8601 — trazabilidad y orden
-        fechaTexto          : String(30);       // dd.MM.yyyy HH:mm — presentación
+        fechaTexto          : String(30);       // dd/MM/yyyy HH:mm en hora de Perú — presentación
 
         // Estado visual — valores literales de las enumeraciones de UI5
         estadoNodo          : String(20);       // ProcessFlowNodeState: Positive|Negative|Neutral|Planned|Critical

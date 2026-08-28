@@ -37,6 +37,8 @@
  */
 
 const cds = require("@sap/cds");
+const { conTimeoutCpi } = require("./con-timeout");
+
 const LOG = cds.log("cpi-client");
 
 let _svc;
@@ -74,7 +76,7 @@ const getSvc = async () => (_svc ??= await cds.connect.to("CPI_H2H"));
 async function registrarAprobacionSAP(oApoReg) {
   const svc = await getSvc();
   try {
-    const res = await svc.post("/apoReg", oApoReg);
+    const res = await conTimeoutCpi(svc.post("/apoReg", oApoReg), "registrarAprobacionSAP");
     LOG.info(`registrarAprobacionSAP OK`);
     return res;
   } catch (err) {
@@ -116,7 +118,7 @@ async function registrarAprobacionSAP(oApoReg) {
 async function registrarObservacionSAP(oObservacion) {
   const svc = await getSvc();
   try {
-    const res = await svc.post("/Obs", oObservacion);
+    const res = await conTimeoutCpi(svc.post("/Obs", oObservacion), "registrarObservacionSAP");
     LOG.info(`registrarObservacionSAP OK`);
     return res;
   } catch (err) {
@@ -202,11 +204,11 @@ function buildApoRegPayload(pp, userSAP, iContadorFirma) {
  */
 async function getProveedores(propuesta) {
   const cpiSvc = await cds.connect.to("CPI_H2H");
-  const respuesta = await cpiSvc.get("/proveedores", {
+  const respuesta = await conTimeoutCpi(cpiSvc.get("/proveedores", {
     NroPP   : propuesta.numeroPropuesta,
     FechaPP : propuesta.fechaPropuestaPago,
     Sociedad: propuesta.sociedad
-  });
+  }), "getProveedores");
   return (Array.isArray(respuesta) ? respuesta : (respuesta?.proveedores ?? []))
     .map((item, idx) => ({
       proveedorId: String(idx + 1).padStart(3, "0"),
@@ -224,11 +226,11 @@ async function getProveedores(propuesta) {
  */
 async function getAdjuntos(propuesta) {
   const cpiSvc = await cds.connect.to("CPI_H2H");
-  const respuesta = await cpiSvc.get("/adjuntos", {
+  const respuesta = await conTimeoutCpi(cpiSvc.get("/adjuntos", {
     NroPP   : propuesta.numeroPropuesta,
     FechaPP : propuesta.fechaPropuestaPago,
     Sociedad: propuesta.sociedad
-  });
+  }), "getAdjuntos");
   return (Array.isArray(respuesta) ? respuesta : (respuesta?.adjuntos ?? []))
     .map(item => ({
       adjuntoId          : item.id                 ?? item.AdjuntoId          ?? cds.utils.uuid(),
@@ -290,7 +292,7 @@ const RUTA_HISTORIAL = "/http/H2H/ECP/HistorialAprobaciones";
 async function getHistorialAprobaciones(propuesta) {
   const cpiSvc = await cds.connect.to("CPI_H2H");
 
-  const respuesta = await cpiSvc.post(RUTA_HISTORIAL, {
+  const respuesta = await conTimeoutCpi(cpiSvc.post(RUTA_HISTORIAL, {
     ZhrfH2hDetailAprobacionWf: {
       IpBukrs: propuesta.sociedad        ?? "",
       IpLaufi: propuesta.numeroPropuesta ?? "",
@@ -303,7 +305,7 @@ async function getHistorialAprobaciones(propuesta) {
       IpBanco: propuesta.banco           ?? "",
       IpWaers: propuesta.moneda          ?? "",
     },
-  });
+  }), "getHistorialAprobaciones");
 
   return _extraerDetalle(respuesta);
 }

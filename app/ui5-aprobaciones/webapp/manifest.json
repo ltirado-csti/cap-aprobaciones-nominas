@@ -76,6 +76,13 @@
       "compact": true,
       "cozy": true
     },
+    "resources": {
+      "css": [
+        {
+          "uri": "css/estilos.css"
+        }
+      ]
+    },
     "models": {
       "i18n": {
         "type": "sap.ui.model.resource.ResourceModel",
@@ -186,6 +193,16 @@
                 }
               },
               "content": {
+                "header": {
+                  "actions": {
+                    "verPDF": {
+                      "press": "centria.h2hpp.aprobaciones.ui5aprobaciones.ext.util.VisorPDF.abrir",
+                      "visible": true,
+                      "enabled": true,
+                      "text": "{i18n>verPDFBoton}"
+                    }
+                  }
+                },
                 "body": {
                   "sections": {
                     "HistorialAprobaciones": {

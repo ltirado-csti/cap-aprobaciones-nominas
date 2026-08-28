@@ -12,8 +12,8 @@
  *   handle_aprobaciones()   → todas las acciones bound de TareasInbox
  *                             (delegadas a aprobacion.service.registrarHandlers)
  *
- * Roles activos (BPA v1.2.0 — H2H Nomina 1.4.0):
- *   Apoderado (pool, quórum de 2) → apoderadoAprobar | apoderadoObservar
+ * Roles activos (BPA v1.2.0 — H2H Nomina 1.5.0):
+ *   Apoderado (pool, quórum de 2) → apoderadoAprobar | apoderadoRechazar
  *   Liberador                     → liberadorLiberar | liberadorRechazar | liberadorAnular
  *   Coordinador                   → ANULADO — retorna 501 si se invoca
  */
@@ -25,6 +25,7 @@ const histSvc  = require("./domain/historial.service");
 const cpiInfra = require("./infrastructure/cpi-client");
 const bpa      = require("./infrastructure/bpa-client");
 const odata    = require("./infrastructure/odata-memoria");
+const { memoPorPeticion } = require("./infrastructure/memo-peticion");
 const perfiles = require("./config/perfiles");
 const estados  = require("./config/estados");
 const { Readable } = require("stream");
@@ -80,21 +81,63 @@ class PagosService extends cds.ApplicationService {
   static handle_pdf() {
     /**
      * GET /nomina/aprobaciones/PropuestaPDF('{id}')/contenido
-     * Sirve el PDF de la propuesta como stream binario.
-     * Origen legado: Detail.view.xml → tab PDF → getPropuestaPDFSAP()
+     * Sirve el PDF de la propuesta como stream binario — es la URL que consume
+     * sap.m.PDFViewer desde el botón "Ver PDF" del Object Page
+     * (app/ui5-aprobaciones/webapp/ext/util/VisorPDF.js).
+     *
+     * La clave `id` es la terna '<numeroPropuesta>-<sociedad>-<yyyy-MM-dd>' que
+     * arma _urlPDF(): la fecha aporta sus propios guiones, por eso se reconstruye
+     * uniendo todo lo que sigue a los dos primeros segmentos.
+     *
+     * ⚠ ORIGEN REAL PENDIENTE: se sirve un documento preliminar hasta que el
+     * iFlow que lo entrega esté disponible. El visor ya funciona de punta a
+     * punta contra este handler, así que conectar el origen real es cambiar
+     * únicamente lo que devuelve el bloque `esContenido` de abajo.
+     *
+     * POR DÓNDE ENTRA EL PDF DEFINITIVO
+     * ---------------------------------
+     * Por CPI, como TODO lo que este servicio necesita de SAP: el historial de
+     * aprobaciones, los proveedores, los adjuntos y el registro de firmas ya van
+     * por ahí (infrastructure/cpi-client.js, destination Cloud_Integration ya
+     * bindeada). El documento lo produce SAP y CPI lo expone; CAP no habla con
+     * SAP por ningún otro canal. Falta únicamente la ruta del iFlow y el formato
+     * de su respuesta para añadir el método al cliente de CPI.
+     *
+     * Lo que hay en el proyecto de la app UI5 anterior NO sirve:
+     * domain/propuesta.service.js → getPDFSAP() y utils.js →
+     * obtenerPDFPropuesta() invocan ambos un cliente `gw` que no existe en
+     * ningún módulo, así que revientan con ReferenceError si se los llama.
+     *
+     * Mientras tanto se sirve un PDF de una página con la terna impresa y
+     * marcado como preliminar: valida el flujo completo sin fingir en ningún
+     * momento que el documento es el de SAP.
      */
     this.on("READ", "PropuestaPDF", async (req) => {
       const id = req.params?.[0]?.id ?? req.params?.[0];
       if (!id) return [];
 
-      const [numeroPropuesta, sociedad, ...fechaParts] = id.split("-");
+      const [numeroPropuesta, sociedad, ...fechaParts] = String(id).split("-");
       const fechaPropuestaPago = fechaParts.join("-");
+      const nombreArchivo      = `${id}.pdf`;
 
       const columns     = req.query?.SELECT?.columns ?? [];
       const esContenido = columns.some(c => c?.ref?.[0] === "contenido");
 
       if (esContenido) {
-        return Readable.from(_getMockPDFBuffer(id));
+        // Readable.from(buffer) NO sirve: un Buffer es iterable de NÚMEROS, así
+        // que el stream emitiría bytes sueltos en object mode y el request
+        // fallaría. Envolverlo en un array lo entrega como un único chunk.
+        const contenido = _construirPDFPreliminar({ id, numeroPropuesta, sociedad, fechaPropuestaPago });
+
+        // Content-Type y Content-Disposition inline: sin ellos el navegador
+        // descarga el archivo en vez de pintarlo, y el iframe del PDFViewer
+        // queda en blanco. Ver capire → Serving Media Data.
+        return {
+          value                            : Readable.from([contenido]),
+          $mediaContentType                : "application/pdf",
+          $mediaContentDispositionFilename : nombreArchivo,
+          $mediaContentDispositionType     : "inline",
+        };
       }
 
       return {
@@ -103,7 +146,7 @@ class PagosService extends cds.ApplicationService {
         sociedad,
         fechaPropuestaPago,
         mimeType     : "application/pdf",
-        nombreArchivo: `${id}.pdf`,
+        nombreArchivo,
       };
     });
   }
@@ -122,7 +165,12 @@ class PagosService extends cds.ApplicationService {
 
       // Sin clave → List Report
       if (!instanceID) {
-        const tareas = await _obtenerTareasBpa(req.user.id);
+        // Normalizado antes de llegar a BPA: getInboxTasks lo envía como
+        // recipientUsers, que es un parámetro SEPARADO POR COMAS. Un id con una
+        // coma arrastrada ("arodas@centria.net,") añade un destinatario vacío y
+        // BPA deja de filtrar: la bandeja pasa a mostrar tareas de todo el
+        // mundo. Ver perfiles.normalizarUsuario.
+        const tareas = await _obtenerTareasBpa(perfiles.normalizarUsuario(req.user.id));
         // BPA no sabe filtrar por sociedad/banco/fecha (viven en el contexto de
         // cada tarea, no en la lista de task-instances), así que el $filter, el
         // $search, el orden y la paginación se aplican aquí sobre la lista ya
@@ -148,7 +196,7 @@ class PagosService extends cds.ApplicationService {
             bpa.obtenerTarea(instanceID),
             bpa.readContext(instanceID),
           ]);
-          if (contexto) return _mapearContextoBpa(instanceID, contexto, tarea?.activityId);
+          if (contexto) return _mapearContextoBpa(instanceID, contexto, tarea?.activityId, tarea?.subject);
         } catch (error) {
           // Mismo fallback que _obtenerTareasBpa y _obtenerDetalleTarea: sin él,
           // esta rama devolvía 500 en cuanto BPA no estaba disponible. Fiori
@@ -236,7 +284,7 @@ class PagosService extends cds.ApplicationService {
   static handle_aprobaciones() {
     /**
      * Registra todos los handlers de acciones bound de TareasInbox:
-     *   apoderadoAprobar  | apoderadoObservar
+     *   apoderadoAprobar  | apoderadoRechazar
      *   liberadorLiberar  | liberadorRechazar  | liberadorAnular
      *   coordinadorAprobar (501) | coordinadorRechazar (501)
      *
@@ -280,6 +328,15 @@ function _formatearImporte(importe, moneda) {
 
   const codigo = String(moneda ?? "").trim().toUpperCase() || "PEN";
 
+  // "$" en vez del "US$" que da Intl para dólares — pedido de negocio.
+  if (codigo === "USD") {
+    const numero = new Intl.NumberFormat("es-PE", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(valor);
+    return `$ ${numero}`;
+  }
+
   try {
     return new Intl.NumberFormat("es-PE", {
       style: "currency",
@@ -305,10 +362,23 @@ function _conImporteFormateado(tarea) {
 
 /**
  * Obtiene y enriquece la lista de tareas BPA con su contexto.
- * Origen legado: Master.controller.js → getInboxTasks() + readContext()
+ *
+ * Memoizado por petición igual que el detalle: el $batch que manda Fiori
+ * Elements tras una acción puede pedir la colección más de una vez (el refresco
+ * del SideEffects y el propio rebinding de la tabla), y cada reconstrucción
+ * cuesta una llamada de lista más un readContext POR TAREA. Ver infrastructure/memo-peticion.
+ *
  * @param {string} usuario - Email del usuario autenticado (req.user.id)
  */
-async function _obtenerTareasBpa(usuario) {
+function _obtenerTareasBpa(usuario) {
+  return memoPorPeticion(`tareas:${usuario}`, () => _cargarTareasBpa(usuario));
+}
+
+/**
+ * Carga real de la bandeja. No llamar directamente: usar _obtenerTareasBpa.
+ * Origen legado: Master.controller.js → getInboxTasks() + readContext()
+ */
+async function _cargarTareasBpa(usuario) {
   try {
     const tareas = await bpa.getInboxTasks(usuario);
     if (!tareas.length) return [];
@@ -321,7 +391,7 @@ async function _obtenerTareasBpa(usuario) {
     return tareasEnriquecidas.map(_conImporteFormateado);
 
   } catch (error) {
-    LOG.warn(`[_obtenerTareasBpa] BPA no disponible — usando mock | ${error.message}`);
+    LOG.warn(`[_cargarTareasBpa] BPA no disponible — usando mock | ${error.message}`);
     return _getMockTareas().map(_conImporteFormateado);
   }
 }
@@ -482,11 +552,12 @@ function _extraerQuorum(contexto, propuesta, flagsRol) {
  * Mapea un contexto BPA al shape de TareasInbox SIN llamar a CPI.
  * Usado por la ruta de $select liviano del READ.
  */
-function _mapearContextoBpa(instanceID, contexto, activityId) {
+function _mapearContextoBpa(instanceID, contexto, activityId, subject) {
   const propuesta = _extraerPropuesta(contexto);
   return _ensamblarDetalle({
     instanceID,
     activityId,
+    subject,
     propuesta,
     notificacion: _extraerNotificacion(contexto, activityId),
     quorum      : _extraerQuorum(contexto, propuesta, perfiles.calcularFlagsRol(activityId)),
@@ -523,8 +594,8 @@ async function _enriquecerConContexto(tarea) {
       viaPago            : propuesta.viaPago           ?? "",
       modalidadPP        : propuesta.modalidadPP       ?? "",
       version            : propuesta.version           ?? "",
-      fechaPropuestaPago : propuesta.fechaPropuestaPago ?? "",
-      fechaPago          : propuesta.fechaPago          ?? "",
+      fechaPropuestaPago : _fecha(propuesta.fechaPropuestaPago),
+      fechaPago          : _fecha(propuesta.fechaPago),
       usuarioCreacion    : propuesta.usuarioCreacion    ?? "",
       correoAnalista     : propuesta.correoAnalista     ?? "",
       ..._camposEstado(flagsRol, { estaTerminado, estaAnulado }),
@@ -549,7 +620,7 @@ async function _enriquecerConContexto(tarea) {
       tituloTarea        : tarea.subject ?? "",
       numeroPropuesta    : "", sociedad: "", banco: "", bancoDescripcion: "",
       importe            : "", moneda: "", viaPago: "", modalidadPP: "",
-      version            : "", fechaPropuestaPago: "", fechaPago: "", usuarioCreacion: "",
+      version            : "", fechaPropuestaPago: null, fechaPago: null, usuarioCreacion: "",
       correoAnalista     : "",
       // Sin contexto no hay flags de cierre, pero el rol de la tarea sí se
       // conoce (viene del activityId), así que el estado sigue siendo el real.
@@ -567,10 +638,25 @@ async function _enriquecerConContexto(tarea) {
 
 /**
  * Obtiene el detalle completo de una tarea para el Object Page.
+ *
+ * Memoizado por petición: el Object Page lo pide una vez para la entidad y otra
+ * por cada tabla de sección, y las cinco lecturas son el mismo dato. Ver
+ * memo-peticion.js para el alcance y por qué no es una caché con TTL.
+ *
+ * @param {string} instanceID
+ */
+function _obtenerDetalleTarea(instanceID) {
+  return memoPorPeticion(`detalle:${instanceID}`, () => _cargarDetalleTarea(instanceID));
+}
+
+/**
+ * Carga real del detalle. No llamar directamente desde los handlers: usar
+ * _obtenerDetalleTarea, que evita repetir el trabajo dentro de la misma petición.
+ *
  * BPA + composiciones CPI en paralelo para minimizar latencia.
  * Origen legado: Detail.controller.js → _onBindingChange()
  */
-async function _obtenerDetalleTarea(instanceID) {
+async function _cargarDetalleTarea(instanceID) {
   try {
     const [tarea, contexto] = await Promise.all([
       bpa.obtenerTarea(instanceID),
@@ -602,6 +688,7 @@ async function _obtenerDetalleTarea(instanceID) {
     return _ensamblarDetalle({
       instanceID,
       activityId: tarea?.activityId,
+      subject   : tarea?.subject,
       propuesta,
       notificacion: _extraerNotificacion(contexto, tarea?.activityId),
       quorum      : _extraerQuorum(contexto, propuesta,
@@ -615,9 +702,62 @@ async function _obtenerDetalleTarea(instanceID) {
 
   } catch (error) {
     if (error.status === 404) throw error;
-    LOG.warn(`[_obtenerDetalleTarea] BPA no disponible — usando mock | ${error.message}`);
+    LOG.warn(`[_cargarDetalleTarea] BPA no disponible — usando mock | ${error.message}`);
     return _getMockDetalle(instanceID);
   }
+}
+
+/**
+ * Normalizadores de salida.
+ *
+ * Un campo con valor `undefined` NO se serializa en JSON: desaparece de la
+ * respuesta OData aunque el $select lo pida. En el cliente eso se ve como
+ * "Failed to drill-down into (...)/campo, invalid segment: campo" y el control
+ * enlazado se queda vacío. Como el contexto BPA no garantiza que la propuesta
+ * traiga todos los campos del DataType, cada valor se normaliza aquí antes de
+ * salir: texto vacío, 0, false o null, pero nunca `undefined`.
+ */
+function _texto(valor)   { return valor === null || valor === undefined ? "" : String(valor); }
+function _entero(valor)  { const n = Number(valor); return Number.isFinite(n) ? Math.trunc(n) : 0; }
+function _booleano(valor) {
+  if (typeof valor === "boolean") return valor;
+  const texto = String(valor ?? "").trim().toUpperCase();
+  return texto === "X" || texto === "TRUE" || texto === "1" || texto === "EXISTE";
+}
+
+/**
+ * Normaliza una fecha para una propiedad Edm.Date.
+ *
+ * Solo yyyy-MM-dd es un valor válido; el "" que se usaba como valor por defecto
+ * no lo es y llega al cliente como una fecha corrupta. Cualquier otra cosa
+ * (vacío, undefined, formato inesperado) se envía como null, que es lo que
+ * OData define para "sin valor".
+ */
+function _fecha(valor) {
+  const texto = String(valor ?? "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(texto) ? texto : null;
+}
+
+/**
+ * URL de la entidad media PropuestaPDF para esta propuesta.
+ *
+ * La clave es la terna '<numeroPropuesta>-<sociedad>-<yyyy-MM-dd>' y NO el
+ * instanceID de BPA, que es lo que se construía antes: el instanceID es un UUID
+ * del workflow, no identifica el documento en SAP, y encima handle_pdf lo
+ * troceaba por guiones esperando justamente esta terna — la URL nunca resolvía.
+ *
+ * Devuelve null si falta cualquiera de los tres campos: sin terna completa no hay
+ * documento que pedir, y un urlPDF vacío hace que el botón "Ver PDF" avise en vez
+ * de abrir un visor roto.
+ */
+function _urlPDF(propuesta) {
+  const partes = [propuesta?.numeroPropuesta, propuesta?.sociedad, propuesta?.fechaPropuestaPago]
+    .map(parte => String(parte ?? "").trim());
+
+  if (partes.some(parte => parte === "")) return null;
+
+  const clave = encodeURIComponent(partes.join("-"));
+  return `/nomina/aprobaciones/PropuestaPDF('${clave}')/contenido`;
 }
 
 /**
@@ -627,7 +767,7 @@ async function _obtenerDetalleTarea(instanceID) {
  * Flags de estado (estaTerminado, estaAnulado): desde contexto BPA.
  * Flags calculados Coordinador: puedeTerminarFlujo, puedeAnular.
  */
-function _ensamblarDetalle({ instanceID, activityId, propuesta, notificacion, quorum, proveedores, adjuntos, aprobadores, niveles, historialEsDemo }) {
+function _ensamblarDetalle({ instanceID, activityId, subject, propuesta, notificacion, quorum, proveedores, adjuntos, aprobadores, niveles, historialEsDemo }) {
   const flagsRol      = perfiles.calcularFlagsRol(activityId);
   const flagsNotif    = notificacion ??
                         { notifTieneError: false, notifMensaje: "", notifCriticidad: 0 };
@@ -644,32 +784,44 @@ function _ensamblarDetalle({ instanceID, activityId, propuesta, notificacion, qu
 
   const base = {
     instanceID,
-    tituloTarea           : propuesta.tituloTarea,
-    numeroPropuesta       : propuesta.numeroPropuesta,
-    sociedad              : propuesta.sociedad,
-    banco                 : propuesta.banco,
-    bancoDescripcion      : propuesta.bancoDescripcion,
-    importe               : propuesta.importe,
-    moneda                : propuesta.moneda,
+    // El título lo pone BPA en el subject de la tarea; la propuesta solo lo
+    // trae en algunos contextos. Mismo orden de preferencia que el List Report
+    // (_enriquecerConContexto), para que la lista y el detalle no muestren
+    // títulos distintos de la misma tarea.
+    tituloTarea           : _texto(subject || propuesta.tituloTarea),
+    numeroPropuesta       : _texto(propuesta.numeroPropuesta),
+    sociedad              : _texto(propuesta.sociedad),
+    banco                 : _texto(propuesta.banco),
+    bancoDescripcion      : _texto(propuesta.bancoDescripcion),
+    importe               : _texto(propuesta.importe),
+    moneda                : _texto(propuesta.moneda),
     importeTexto          : _formatearImporte(propuesta.importe, propuesta.moneda),
-    viaPago               : propuesta.viaPago,
-    modalidadPP           : propuesta.modalidadPP,
-    version               : propuesta.version,
-    fechaPropuestaPago    : propuesta.fechaPropuestaPago,
-    fechaPago             : propuesta.fechaPago,
-    usuarioCreacion       : propuesta.usuarioCreacion,
-    usuarioCreacionPP     : propuesta.usuarioCreacionPP,
-    analista              : propuesta.analista,
-    correoAnalista        : propuesta.correoAnalista,
-    existeDocumento       : propuesta.existeDocumento,
-    indicadorPagoAdelanto : propuesta.indicadorPagoAdelanto,
+    viaPago               : _texto(propuesta.viaPago),
+    modalidadPP           : _texto(propuesta.modalidadPP),
+    version               : _texto(propuesta.version),
+    fechaPropuestaPago    : _fecha(propuesta.fechaPropuestaPago),
+    fechaPago             : _fecha(propuesta.fechaPago),
+    usuarioCreacion       : _texto(propuesta.usuarioCreacion),
+    usuarioRevisor        : _texto(propuesta.usuarioRevisor),
+    analista              : _texto(propuesta.analista),
+    correoAnalista        : _texto(propuesta.correoAnalista),
+    existeDocumento       : _booleano(propuesta.existeDocumento),
+    indicadorPagoAdelanto : _texto(propuesta.indicadorPagoAdelanto),
+    tipoNomina            : _texto(propuesta.tipoNomina),
+    tipoTrabajador        : _texto(propuesta.tipoTrabajador),
+    subdivision           : _texto(propuesta.subdivision),
     estadoPP              : estado.texto,
     estadoCriticidad      : estado.criticidad,
-    urlPDF                : `/nomina/aprobaciones/PropuestaPDF('${instanceID}')/contenido`,
-    contadorFirma         : propuesta.contadorFirma,
-    usuarioLiberador      : propuesta.usuarioLiberador,
-    usuarioCoordinador    : propuesta.usuarioCoordinador,
-    usuarioCaja           : propuesta.usuarioCaja,
+    urlPDF                : _urlPDF(propuesta),
+    contadorFirma         : _entero(propuesta.contadorFirma),
+    cantidad              : _entero(propuesta.cantidad),
+    // Lista, no un correo suelto: Payroll puede designar varios liberadores en
+    // este campo y BPA reparte esa lista como destinatarios de la tarea. Se
+    // normaliza igual que las de apoderados —minúsculas, sin duplicados,
+    // separadas por ", "— para que un CSV crudo no llegue a la UI tal cual.
+    usuarioLiberador      : perfiles.normalizarUsuarios(propuesta.usuarioLiberador).join(", "),
+    usuarioCoordinador    : _texto(propuesta.usuarioCoordinador),
+    usuarioCaja           : _texto(propuesta.usuarioCaja),
     // usuarioApoderado, usuariosRevisores y usuariosSupervisores se mapeaban
     // aquí sin existir en TareasInbox: los dos primeros salieron del DataType
     // de BPA hace versiones y el tercero nunca llegó a la entidad. Se retiran
@@ -754,7 +906,7 @@ function _getMockTareas() {
       instanceID: "mock-task-001",
       activityId: "form_aprobacionLiberadorFinal_1",
       tituloTarea: "0025-R4603-BCP-20/05/2026-L", numeroPropuesta: "R4603",
-      sociedad: "0025", fechaPropuestaPago: "20-05-2026", fechaPago: "20-05-2026", banco: "BCP",
+      sociedad: "0025", fechaPropuestaPago: "2026-05-20", fechaPago: "2026-05-20", banco: "BCP",
       bancoDescripcion: "001 - BCP Soles", viaPago: "N", modalidadPP: "H2H",
       version: "0001", importe: "43038.69", moneda: "PEN",
       usuarioCreacion: "cpanduro@centria.net",
@@ -764,7 +916,7 @@ function _getMockTareas() {
       instanceID: "mock-task-002",
       activityId: "form_aprobacionDelApoderado_1",
       tituloTarea: "0025-R4615-BCP-22/05/2026-A", numeroPropuesta: "R4615",
-      sociedad: "0025", fechaPropuestaPago: "22-05-2026", fechaPago: "22-05-2026", banco: "BCP",
+      sociedad: "0025", fechaPropuestaPago: "2026-05-22", fechaPago: "2026-05-22", banco: "BCP",
       bancoDescripcion: "001 - BCP Soles", viaPago: "W", modalidadPP: "H2H",
       version: "0001", importe: "8500.00", moneda: "PEN",
       usuarioCreacion: "arodas@centria.net",
@@ -786,7 +938,7 @@ function _getMockTareas() {
       instanceID: "mock-task-003",
       activityId: "form_aprobacionDelApoderado_1",
       tituloTarea: "0025-R4616-BCP-22/05/2026-A", numeroPropuesta: "R4616",
-      sociedad: "0025", fechaPropuestaPago: "22-05-2026", fechaPago: "22-05-2026", banco: "BCP",
+      sociedad: "0025", fechaPropuestaPago: "2026-05-22", fechaPago: "2026-05-22", banco: "BCP",
       bancoDescripcion: "001 - BCP Soles", viaPago: "N", modalidadPP: "H2H",
       version: "0001", importe: "12300.00", moneda: "PEN",
       usuarioCreacion: "arodas@centria.net",
@@ -859,7 +1011,7 @@ function _getMockDetalle(instanceID) {
   const PROPUESTA_SIMULADA = {
     usuariosApoderados: "jlicetti@centria.net,lqcastro@centria.net,arodas@centria.net",
     usuarioLiberador  : "bmendoza@centria.net",
-    usuarioCreacionPP : "MRICANQUI",
+    analista          : "MRICANQUI",
   };
 
   // Sin BPA no hay a quién preguntar por las firmas, así que el diagrama del
@@ -879,8 +1031,8 @@ function _getMockDetalle(instanceID) {
     tituloTarea           : "0025-R4603-BCP-20/05/2026-R",
     numeroPropuesta       : "R4603",
     sociedad              : "0025",
-    fechaPropuestaPago    : "20-05-2026",
-    fechaPago             : "20-05-2026",
+    fechaPropuestaPago    : "2026-05-20",
+    fechaPago             : "2026-05-20",
     banco                 : "BCP",
     bancoDescripcion      : "001 - BCP Soles",
     viaPago               : "N",
@@ -891,13 +1043,15 @@ function _getMockDetalle(instanceID) {
     importeTexto          : _formatearImporte("43038.69", "PEN"),
     analista              : "MRICANQUI",
     correoAnalista        : "mricanqui@centria.net",
-    existeDocumento       : "EXISTE",
+    existeDocumento       : true,
     indicadorPagoAdelanto : "",
     contadorFirma         : 0,
+    cantidad              : 1,
     usuarioCreacion       : "cpanduro@centria.net",
-    usuarioCreacionPP     : "MRICANQUI",
+    usuarioRevisor        : "",
     estadoPP              : "EN_FIRMA",
-    urlPDF                : `/nomina/aprobaciones/PropuestaPDF('${instanceID}')/contenido`,
+    urlPDF                : _urlPDF({ numeroPropuesta: "R4603", sociedad: "0025",
+                                     fechaPropuestaPago: "2026-05-20" }),
     usuarioLiberador      : PROPUESTA_SIMULADA.usuarioLiberador,
     usuarioCoordinador    : "",
     usuarioCaja           : "",
@@ -933,22 +1087,150 @@ function _getMockDetalle(instanceID) {
 }
 
 /**
- * Genera un buffer PDF mínimo válido para verificación local.
+ * PDF PRELIMINAR de la propuesta.
+ *
+ * Provisional: sustituye al documento real mientras el iFlow de CPI que lo
+ * entrega no esté disponible (ver el aviso en handle_pdf). Muestra la terna que
+ * identifica a la propuesta y se declara preliminar de forma inequívoca —marca
+ * de agua y aviso al pie— para que nadie firme creyendo que está viendo el
+ * detalle real del lote de pago.
+ *
+ * Se escribe a mano en lugar de usar pdfkit a propósito: pdfkit NO está en las
+ * dependencias del proyecto (utils.js lo requiere y por eso también falla), y no
+ * vale la pena sumar una dependencia para un artefacto que se va a borrar en
+ * cuanto el iFlow entregue el PDF verdadero.
  */
-function _getMockPDFBuffer(id) {
-  const content = [
-    "%PDF-1.4",
-    "1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj",
-    "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj",
-    "3 0 obj<</Type/Page/MediaBox[0 0 595 842]/Parent 2 0 R/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj",
-    `4 0 obj<</Length 44>>\nstream\nBT /F1 12 Tf 100 700 Td (${id}) Tj ET\nendstream\nendobj`,
-    "5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj",
-    "xref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n",
-    "trailer<</Size 6/Root 1 0 R>>",
-    "startxref\n441",
-    "%%EOF",
-  ].join("\n");
-  return Buffer.from(content, "latin1");
+function _construirPDFPreliminar({ id, numeroPropuesta, sociedad, fechaPropuestaPago }) {
+  const filas = [
+    ["N\u00b0 de propuesta",           numeroPropuesta    || "\u2014"],
+    ["Sociedad",                       sociedad           || "\u2014"],
+    ["Fecha de propuesta de pago",     _fechaDdMmAaaa(fechaPropuestaPago) || "\u2014"],
+    ["Clave del documento",            id],
+  ];
+
+  const flujo = _flujoPaginaPreliminar(filas);
+
+  // Fuentes con WinAnsiEncoding: sin ella los acentos y el símbolo de grado se
+  // pintan como caracteres sueltos. El buffer se escribe en latin1, que es
+  // justamente la codificación que WinAnsi espera byte a byte.
+  const objetos = [
+    "<</Type/Catalog/Pages 2 0 R>>",
+    "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+    "<</Type/Page/MediaBox[0 0 595 842]/Parent 2 0 R/Contents 4 0 R" +
+      "/Resources<</Font<</F1 5 0 R/F2 6 0 R>>>>>>",
+    `<</Length ${Buffer.byteLength(flujo, "latin1")}>>\nstream\n${flujo}\nendstream`,
+    "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>",
+    "<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold/Encoding/WinAnsiEncoding>>",
+  ];
+
+  return _ensamblarPDF(objetos);
+}
+
+/**
+ * yyyy-MM-dd → dd/MM/yyyy, la convención con la que se leen las fechas aquí.
+ *
+ * Se parte la cadena en vez de construir un Date a propósito: una fecha SIN hora
+ * la interpreta JavaScript como UTC, y al presentarla en hora de Perú (-05:00)
+ * retrocedería al día anterior. Aquí no hay hora que ajustar —es una fecha de
+ * calendario, no un instante—, así que no hay nada que convertir.
+ */
+function _fechaDdMmAaaa(iso) {
+  const partes = String(iso ?? "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return partes ? `${partes[3]}/${partes[2]}/${partes[1]}` : "";
+}
+
+/** Escapa los caracteres que delimitan una cadena literal en PDF. */
+function _txt(valor) {
+  return String(valor ?? "").replace(/([\()])/g, "\$1");
+}
+
+/** Una línea de texto: fuente, tamaño, color RGB (0-1), posición y contenido. */
+function _linea({ fuente = "F1", tam = 10, rgb = "0 0 0", x, y, texto }) {
+  return `BT /${fuente} ${tam} Tf ${rgb} rg ${x} ${y} Td (${_txt(texto)}) Tj ET`;
+}
+
+/**
+ * Content stream de la página. Coordenadas en puntos sobre A4 (595 x 842) con
+ * el origen abajo a la izquierda, que es el sistema nativo del formato.
+ */
+function _flujoPaginaPreliminar(filas) {
+  const AZUL   = "0.078 0.208 0.361";
+  const GRIS   = "0.45 0.45 0.45";
+  const NEGRO  = "0.13 0.13 0.13";
+  const BLANCO = "1 1 1";
+
+  const ops = [
+    // ── Banda de cabecera ────────────────────────────────────────────────
+    `${AZUL} rg 0 772 595 70 re f`,
+    _linea({ fuente: "F2", tam: 22, rgb: BLANCO, x: 48, y: 803, texto: "Propuesta de Pago" }),
+    _linea({ tam: 10, rgb: BLANCO, x: 48, y: 785, texto: "N\u00f3mina H2H \u2014 Aprobaci\u00f3n de propuestas" }),
+
+    // ── Marca de agua diagonal ───────────────────────────────────────────
+    // q/Q aísla la rotación: sin ellos todo lo dibujado después heredaría la
+    // matriz girada.
+    "q 0.90 0.90 0.90 rg 0.7071 0.7071 -0.7071 0.7071 105 210 cm",
+    _linea({ fuente: "F2", tam: 62, rgb: "0.90 0.90 0.90", x: 0, y: 0, texto: "PRELIMINAR" }),
+    "Q",
+
+    // ── Aviso ────────────────────────────────────────────────────────────
+    "0.99 0.95 0.80 rg 48 690 499 52 re f",
+    "0.85 0.60 0.10 rg 48 690 4 52 re f",
+    _linea({ fuente: "F2", tam: 11, rgb: "0.45 0.32 0.02", x: 66, y: 722,
+             texto: "Documento preliminar" }),
+    _linea({ tam: 9, rgb: "0.45 0.32 0.02", x: 66, y: 708,
+             texto: "Este NO es el detalle real del lote de pago. El documento definitivo lo emite SAP y" }),
+    _linea({ tam: 9, rgb: "0.45 0.32 0.02", x: 66, y: 697,
+             texto: "llega por Cloud Integration; se mostrar\u00e1 aqu\u00ed en cuanto el iFlow est\u00e9 disponible." }),
+
+    // ── Título del bloque de datos ───────────────────────────────────────
+    _linea({ fuente: "F2", tam: 12, rgb: NEGRO, x: 48, y: 650, texto: "Datos de la propuesta" }),
+    `${AZUL} rg 48 644 60 2 re f`,
+  ];
+
+  // ── Filas de datos ─────────────────────────────────────────────────────
+  let y = 612;
+  for (const [etiqueta, valor] of filas) {
+    ops.push(_linea({ tam: 9,  rgb: GRIS,  x: 48, y: y,      texto: etiqueta }));
+    ops.push(_linea({ fuente: "F2", tam: 13, rgb: NEGRO, x: 48, y: y - 18, texto: valor }));
+    ops.push(`0.88 0.88 0.88 rg 48 ${y - 30} 499 0.8 re f`);
+    y -= 52;
+  }
+
+  // ── Pie ────────────────────────────────────────────────────────────────
+  ops.push(`0.88 0.88 0.88 rg 48 70 499 0.8 re f`);
+  ops.push(_linea({ tam: 8, rgb: GRIS, x: 48, y: 56,
+                    texto: "Generado por CAP \u2014 PagosService.PropuestaPDF \u2014 documento preliminar" }));
+
+  return ops.join("\n");
+}
+
+/**
+ * Envuelve los objetos en un PDF válido con su tabla xref.
+ *
+ * Los offsets se calculan sobre los bytes ya escritos: escribirlos a mano
+ * —como hacía el mock anterior, con posiciones fijas que no correspondían a
+ * nada— produce un archivo que solo abre gracias a que los visores reconstruyen
+ * la tabla por su cuenta.
+ */
+function _ensamblarPDF(objetos) {
+  let pdf = "%PDF-1.4\n";
+  const offsets = [];
+
+  objetos.forEach((cuerpo, indice) => {
+    offsets.push(Buffer.byteLength(pdf, "latin1"));
+    pdf += `${indice + 1} 0 obj\n${cuerpo}\nendobj\n`;
+  });
+
+  const inicioXref = Buffer.byteLength(pdf, "latin1");
+  const total      = objetos.length + 1;   // +1 por la entrada libre obligatoria
+
+  pdf += `xref\n0 ${total}\n0000000000 65535 f \n`;
+  for (const offset of offsets) {
+    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<</Size ${total}/Root 1 0 R>>\nstartxref\n${inicioXref}\n%%EOF\n`;
+
+  return Buffer.from(pdf, "latin1");
 }
 
 module.exports = { PagosService };
