@@ -1,28 +1,17 @@
 "use strict";
 /**
- * srv/utils.js
+ * Implementación del UtilsService (utils.cds): exportación de PDF/Excel y
+ * envío de correo.
  *
- * Implementación del UtilsService (utils.cds).
- *
- * Fuentes de datos reales (verificadas en código fuente UI5):
- *
- *   PDF propuesta   → CPI (iFlow pendiente de publicar) → base64
- *                     En este proyecto TODO lo que viene de SAP entra por Cloud
- *                     Integration. La app UI5 anterior llamaba directamente a
- *                     /WfObtenerPDFH2HSet de Gateway (oPPOData.getPropuestaPDFSAP()),
- *                     y de ahí venía este handler; ese canal directo ya no aplica.
- *                     El PDF que consume la app de aprobaciones lo sirve
- *                     PagosService.PropuestaPDF, no este servicio.
- *
+ *   PDF propuesta    → CPI (iFlow pendiente de publicar) → base64
  *   PDF aprobaciones → HANA /PropuestaPagoAprobadores → pdfkit server-side
- *
  *   Excel            → HANA /PropuestaPago, /PropuestaPagoAprobadores → exceljs server-side
- *
  *   Correo           → SAP Gateway ZFISO_CORREO_ONB_H2H_SRV /EnviarCorreo_Aprobado
- *                      Equivale a: oPPOData.enviarCorreoAprobadores() en PPOData.js
  */
 
 const cds = require("@sap/cds");
+const hora = require("./config/zona-horaria");
+
 const LOG  = cds.log("utils-service");
 
 module.exports = cds.service.impl(async function (srv) {
@@ -31,22 +20,13 @@ module.exports = cds.service.impl(async function (srv) {
 
   /**
    * Obtiene el PDF de la propuesta generado por SAP.
-   *
-   * ⚠ CÓDIGO LEGADO, NO OPERATIVO. Llama a un cliente `gw` que no existe en
-   * ningún módulo de este proyecto: cualquier invocación termina en
-   * ReferenceError. Se conserva como referencia de los campos que SAP necesita
-   * para localizar el documento (NroPP, Sociedad, FechaPP, Banco).
-   *
-   * Y el canal que asume ya no es el del proyecto: venía de la app UI5 anterior,
-   * que llamaba directamente a Gateway /WfObtenerPDFH2HSet. Aquí toda la
-   * comunicación con SAP pasa por CPI, así que el PDF llegará por un iFlow —ver
-   * el aviso de handle_pdf() en pagos-service.js, que es donde vive el visor.
+   * NO OPERATIVO: depende de un cliente `gw` no implementado en este proyecto.
+   * El PDF que consume la app de aprobaciones lo sirve PagosService.PropuestaPDF.
    */
   srv.on("obtenerPDFPropuesta", async (req) => {
     const { NroPP, Sociedad, FechaPP, Banco } = req.data;
 
     try {
-      // Construir objeto pp compatible con sap-gateway-client
       const pp = {
         NroPP,
         Sociedad,
@@ -67,7 +47,6 @@ module.exports = cds.service.impl(async function (srv) {
         sBase64 = sBase64.split(",")[1];
       }
 
-      // Nombre de archivo igual al que usa onDownloadPDF() en Detail.controller.js
       const sNombre = `${NroPP}-${Sociedad}-${Banco}-${FechaPP}`.replaceAll("/", "-");
 
       LOG.info(`obtenerPDFPropuesta OK | NroPP=${NroPP}`);
@@ -140,7 +119,7 @@ module.exports = cds.service.impl(async function (srv) {
           const yRow = doc.y;
           const accion = apr.Aprobado === "1" ? "Aprobó" : "Observó";
           const fecha  = apr.FechaAprob
-            ? new Date(apr.FechaAprob).toLocaleDateString("es-PE")
+            ? new Date(apr.FechaAprob).toLocaleDateString("es-PE", { timeZone: hora.ZONA })
             : "-";
 
           doc.text(apr.Usuario    ?? "-", cols.usuario,  yRow, { width: 115 });
@@ -161,7 +140,7 @@ module.exports = cds.service.impl(async function (srv) {
         // Pie
         doc.moveDown(1);
         doc.fontSize(7).fillColor("gray")
-          .text(`Generado: ${new Date().toLocaleString("es-PE")}`, { align: "right" });
+          .text(`Generado: ${hora.formatearFechaHora(new Date())}`, { align: "right" });
 
         doc.end();
       });
@@ -251,7 +230,7 @@ module.exports = cds.service.impl(async function (srv) {
           Analista        : pp.Analista,
           UserModif       : pp.UserModif,
           FechaModif      : pp.FechaModif
-            ? new Date(pp.FechaModif).toLocaleDateString("es-PE")
+            ? new Date(pp.FechaModif).toLocaleDateString("es-PE", { timeZone: hora.ZONA })
             : "",
         });
       }
@@ -263,7 +242,7 @@ module.exports = cds.service.impl(async function (srv) {
       wsInfo.addRow(["Fecha Hasta", FechaHasta]);
       wsInfo.addRow(["Estado PP", EstadoPP || "Todos"]);
       wsInfo.addRow(["Total registros", aPropuestas.length]);
-      wsInfo.addRow(["Generado", new Date().toLocaleString("es-PE")]);
+      wsInfo.addRow(["Generado", hora.formatearFechaHora(new Date())]);
 
       const buffer   = await workbook.xlsx.writeBuffer();
       const filename = `Propuestas_${Sociedad}_${FechaDesde}_${FechaHasta}.xlsx`;
@@ -327,7 +306,7 @@ module.exports = cds.service.impl(async function (srv) {
           Aprobado   : apr.Aprobado === "1" ? "Aprobó" : "Observó",
           Observacion: apr.Observacion ?? "",
           FechaAprob : apr.FechaAprob
-            ? new Date(apr.FechaAprob).toLocaleDateString("es-PE")
+            ? new Date(apr.FechaAprob).toLocaleDateString("es-PE", { timeZone: hora.ZONA })
             : "",
           HoraAprob  : apr.HoraAprob ?? "",
         });
@@ -353,16 +332,13 @@ module.exports = cds.service.impl(async function (srv) {
 
   /**
    * Dispara el correo a través de SAP Gateway ZFISO_CORREO_ONB_H2H_SRV.
-   * Equivale a: oPPOData.enviarCorreoAprobadores() en PPOData.js
-   *
-   * Normalmente el correo se dispara automáticamente desde aprobacion.service.js.
-   * Esta función queda disponible para el UI5 si necesita dispararlo manualmente.
+   * El correo normalmente se dispara automáticamente desde aprobacion.service.js;
+   * esta acción lo deja disponible para dispararlo manualmente desde UI5.
    */
   srv.on("enviarCorreo", async (req) => {
     const { NroPP, Sociedad, FechaPP, Version, Profil, Usuario } = req.data;
 
     try {
-      // Reconstruir el objeto pp mínimo que espera sap-gateway-client
       const pp = {
         NroPP,
         Sociedad,

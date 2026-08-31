@@ -1,15 +1,11 @@
 /**
- * app/ui5-aprobaciones/webapp/ext/controller/AccionesHandler.js
- *
  * Controller Extension — acciones BPA del Object Page.
- * Registrar en manifest.json bajo:
- *   sap.ui5 > extends > extensions > sap.ui.controllerExtensions >
- *   sap.fe.templates.ObjectPage.ObjectPageController
+ * Registrado en manifest.json bajo sap.ui5 > extends > extensions >
+ * sap.ui.controllerExtensions > sap.fe.templates.ObjectPage.ObjectPageController.
  *
- * Visible: true en todos los botones (sin expression binding que dependa de
- * esApoderado). El field esApoderado no llega al $select del Object Page en
- * esta version de FE, lo que causaria que el binding evaluara false (oculto).
- * La autorizacion real la valida el backend (_prepararAccion lee el rol de BPA).
+ * Botones con Visible: true (sin binding a esApoderado, que no llega al
+ * $select del Object Page); la autorización real la valida el backend
+ * (_prepararAccion lee el rol de BPA).
  */
 sap.ui.define([
     "sap/ui/core/mvc/ControllerExtension",
@@ -38,20 +34,14 @@ sap.ui.define([
     return ControllerExtension.extend(
         "centria.h2hpp.aprobaciones.ui5aprobaciones.ext.controller.AccionesHandler",
         {
-            // ─── PUNTOS DE EXTENSION OFICIALES DE sap.fe ──────────────────────
-            // Hooks como onPageReady deben declararse dentro de "override" para
-            // que sap.fe.templates.ObjectPage.ObjectPageController los reconozca
-            // y los invoque. Declararlos como metodo directo del objeto (fuera de
-            // "override") causa un error interno al intentar resolverlos.
+            // Los hooks deben declararse dentro de "override" para que
+            // sap.fe.templates.ObjectPage.ObjectPageController los reconozca.
             override: {
                 /**
                  * Se dispara una vez que la pagina esta totalmente enlazada y renderizada.
-                 *
-                 * IconUrl en UI.DataFieldForAction NO se pinta en botones de footer
-                 * (Determining: true) — es una limitacion del template de Object Page.
-                 * Se inyecta el icono por codigo, buscando los botones por su texto
-                 * (Label de la anotacion), ya que sap.fe no expone un ID estable
-                 * para estas acciones sin declarar un ID explicito en la anotacion.
+                 * IconUrl en UI.DataFieldForAction no se pinta en botones de
+                 * footer (Determining: true), así que se inyecta el icono por
+                 * código, buscando los botones por su Label.
                  */
                 onPageReady: function () {
                     var mIconosPorLabel = {
@@ -71,11 +61,7 @@ sap.ui.define([
                     this._observarCierreTrasAccion();
                 },
 
-                /**
-                 * Al destruirse la vista hay que cortar cualquier espera pendiente:
-                 * un setTimeout vivo intentaria navegar sobre un controller ya
-                 * destruido si el usuario sale de la pagina por su cuenta.
-                 */
+                /** Al destruirse la vista, cancela cualquier espera pendiente. */
                 onExit: function () {
                     this._cancelarEsperaMensaje();
                     if (this._oEstadoPPBinding) {
@@ -88,22 +74,9 @@ sap.ui.define([
             // ─── ICONO DEL BOTON "VER PDF" ────────────────────────────────────
 
             /**
-             * Pone el icono de PDF al boton "Ver PDF" del header.
-             *
-             * No sale del manifest: las acciones custom (content > header >
-             * actions) NO admiten `icon`. El conversor de sap.fe que las traduce
-             * a botones —core/converters/controls/Common/Action.js,
-             * getActionsFromManifest— copia text, press, visible, enabled,
-             * position, menu y demas, pero nunca lee un icono; los unicos iconos
-             * que pone son los suyos, escritos a fuego para acciones estandar
-             * como exportar o imprimir. De ahi que se asigne aqui, sobre el
-             * boton ya construido.
-             *
-             * Se localiza por ID y no por texto —al contrario que Aprobar y
-             * Rechazar, que vienen de anotaciones— porque una accion custom SI
-             * tiene ID estable: sap.fe le incrusta su clave del manifest
-             * ("...::CustomAction::verPDF"). Es un ancla mejor que el rotulo,
-             * que sale de i18n y cambia con el idioma.
+             * Pone el icono de PDF al boton "Ver PDF" del header. No sale del
+             * manifest: las acciones custom no admiten `icon`. Se localiza por
+             * ID (sap.fe le incrusta su clave del manifest, "...::CustomAction::verPDF").
              */
             _ponerIconoVerPDF: function () {
                 this.getView()
@@ -119,20 +92,12 @@ sap.ui.define([
             // ─── CIERRE AUTOMATICO TRAS UNA ACCION EXITOSA ────────────────────
 
             /**
-             * Aprobar/Rechazar/Liberar/Anular tienen Common.SideEffects
-             * en la anotacion (ver annotations.cds), que ya refresca la coleccion
-             * TareasInbox y hace desaparecer la tarea resuelta de "Propuestas de
-             * Nómina". Pero eso solo actualiza la lista: el Object Page (columna
-             * media) se queda abierto mostrando la tarea ya resuelta hasta que el
-             * usuario lo cierra manualmente.
-             *
-             * Como los botones ejecutan la accion OData a traves del flujo
-             * estandar de sap.fe (no de _ejecutarDirecto/_ejecutarConComentario
-             * de este archivo), no hay una promesa propia que avisar cuando la
-             * accion termina. En su lugar se observa el campo estadoPP —el
-             * "Estado" del header— que BPA cambia como resultado de cada
-             * decision; su primer cambio tras el render inicial se interpreta
-             * como "accion completada" y dispara el cierre.
+             * Common.SideEffects (ver annotations.cds) refresca TareasInbox
+             * tras Aprobar/Rechazar/Liberar/Anular, pero el Object Page se
+             * queda abierto. Como esos botones ejecutan la acción OData por el
+             * flujo estándar de sap.fe, se observa el campo estadoPP: su
+             * primer cambio tras el render inicial se interpreta como "acción
+             * completada" y dispara el cierre.
              */
             _observarCierreTrasAccion: function () {
                 var that     = this;
@@ -144,9 +109,6 @@ sap.ui.define([
                 if (this._oEstadoPPBinding) {
                     this._oEstadoPPBinding.destroy();
                 }
-                // onPageReady se dispara en cada navegacion: cancelar la espera
-                // de la tarea anterior evita que un temporizador viejo navegue
-                // encima de la pagina recien abierta.
                 this._cancelarEsperaMensaje();
 
                 var bPrimerValor = true;
@@ -156,10 +118,6 @@ sap.ui.define([
                         bPrimerValor = false;
                         return;
                     }
-                    // No navegar de inmediato: al cerrarse el Object Page se
-                    // destruye el diálogo de mensaje que Fiori Elements acaba de
-                    // abrir con el resultado (sap-messages), y el usuario nunca
-                    // alcanza a leerlo. Se espera a que lo cierre.
                     that._navegarTrasLeerMensaje();
                 });
                 this._oEstadoPPBinding.initialize();
@@ -168,15 +126,10 @@ sap.ui.define([
             // ─── ESPERA AL CIERRE DEL MENSAJE ANTES DE NAVEGAR ────────────────
 
             /**
-             * Difiere la navegacion a la lista hasta que no quede ningun dialogo
-             * abierto — en la practica, hasta que el usuario cierre el mensaje de
-             * resultado que Fiori Elements muestra a partir de la cabecera
-             * sap-messages que emite el backend (req.info en aprobacion.service.js).
-             *
-             * La gracia inicial es necesaria: el cambio de estadoPP puede llegar
-             * ANTES de que FE alcance a abrir el dialogo. Sin ella se consultaria
-             * "hay dialogos abiertos?" cuando todavia no hay ninguno y se navegaria
-             * igual, reproduciendo el problema.
+             * Difiere la navegación a la lista hasta que el usuario cierre el
+             * diálogo de resultado que Fiori Elements abre (sap-messages). La
+             * gracia inicial evita consultar "hay diálogos abiertos" antes de
+             * que FE alcance a abrir el suyo.
              */
             _navegarTrasLeerMensaje: function () {
                 var that = this;
@@ -187,17 +140,14 @@ sap.ui.define([
             },
 
             /**
-             * Reintenta hasta que InstanceManager no reporte dialogos abiertos.
-             * El tope evita quedar colgado si algun dialogo permanece abierto por
-             * otro motivo: pasados ~30 s se navega igual.
+             * Reintenta hasta que InstanceManager no reporte diálogos abiertos.
+             * El tope evita quedar colgado (~30 s) si un diálogo no se cierra.
              */
             _esperarCierreDialogos: function (iIntento) {
                 var that = this;
                 var MAX_INTENTOS = 100;   // 100 x 300 ms ≈ 30 s
 
                 sap.ui.require(["sap/m/InstanceManager"], function (InstanceManager) {
-                    // La vista pudo destruirse mientras esperabamos (el usuario
-                    // navego por su cuenta): abortar sin tocar el router.
                     if (!that.getView() || that.getView().bIsDestroyed) {
                         return;
                     }
@@ -331,20 +281,9 @@ sap.ui.define([
             // ─── NAVEGACION ──────────────────────────────────────────────────
 
             /**
-             * Vuelve a la lista cerrando la columna del Object Page (FCL).
-             *
-             * Implementacion anterior y por que fallaba:
-             *   getView().getController().getOwnerComponent().getRouter()
-             *   En sap.fe el componente propietario de la vista es el component
-             *   del TEMPLATE (sap.fe.templates.ObjectPage.Component), que NO tiene
-             *   router propio: getRouter() devuelve undefined y el .navTo() lanza
-             *   TypeError. El catch caia entonces en window.history.back(), que si
-             *   la app se abrio directamente (Launchpad o pestaña nueva) NO vuelve
-             *   a la lista: SACA AL USUARIO DEL APLICATIVO.
-             *
-             * Ahora se usa la via soportada por sap.fe —ExtensionAPI.getRouting()—
-             * con un respaldo que sube por la jerarquia de componentes hasta
-             * encontrar uno con router. Y sobre todo: nunca history.back().
+             * Vuelve a la lista cerrando la columna del Object Page (FCL), vía
+             * ExtensionAPI.getRouting() con respaldo subiendo por la jerarquía
+             * de componentes hasta encontrar uno con router. Nunca history.back().
              */
             _navegarALista: function () {
                 var RUTA_LISTA = "TareasInboxList";

@@ -1,25 +1,7 @@
 "use strict";
 /**
- * srv/infrastructure/bpa-client.js
- *
  * Acceso a SAP Build Process Automation — Workflow Runtime REST API v1.
- * Especificación oficial verificada: SPA_Workflow_Runtime.json
- *
- * Base URL del destino BPA_WORKFLOW:
- *   https://{host}/public/workflow/rest
- *
- * Todos los endpoints usan el prefijo /v1 verificado en el JSON oficial.
- *
- * Métodos expuestos:
- *   getInboxTasks()                       → GET   /v1/task-instances
- *   listarTareasEnCurso()                 → GET   /v1/task-instances (todos los usuarios)
- *   obtenerTarea(taskId)                  → GET   /v1/task-instances/{id}
- *   readContext(taskId)                   → GET   /v1/task-instances/{id}/context
- *   completarTarea(taskId, opciones)      → PATCH /v1/task-instances/{id}
- *   reasignarTarea(taskId, nuevoUsuario)  → PATCH /v1/task-instances/{id}
- *   iniciarInstancia(definitionId, ctx)   → POST  /v1/workflow-instances
- *   obtenerEstadoInstancia(instanceId)    → GET   /v1/workflow-instances/{id}
- *   cerrarFlujo(instanceId)               → PATCH /v1/workflow-instances/{id}
+ * Destino BPA_WORKFLOW, base URL: https://{host}/public/workflow/rest
  */
 
 const cds = require("@sap/cds");
@@ -27,65 +9,42 @@ const { conTimeoutBpa } = require("./con-timeout");
 
 const LOG = cds.log("bpa-client");
 
-// Singleton de conexión al destino BPA_WORKFLOW
 let _svc;
 const getSvc = async () => (_svc ??= await cds.connect.to("BPA_WORKFLOW"));
 
-// ─── OBTENER TAREAS DEL INBOX ─────────────────────────────────────────────────
-
 /**
- * Endpoint verificado: GET /public/workflow/rest/v1/task-instances
- *
+ * Tareas READY del inbox del usuario. GET /v1/task-instances
  * @param {string} usuario - email del usuario autenticado (req.user.id)
- * @returns {Promise<Array>} Lista de tareas BPA sin transformar (máx. 20)
+ * @returns {Promise<Array>} tareas BPA sin transformar
  */
 async function getInboxTasks(usuario) {
-  // Salvaguarda: sin usuario no se consulta BPA — evita exponer tareas ajenas
   if (!usuario) {
     LOG.warn("getInboxTasks | usuario no informado — se retorna lista vacía");
     return [];
   }
- 
+
   const svc = await getSvc();
- 
-  // Los parámetros van en la query string: es la forma inequívoca de enviarlos
-  // en un servicio remoto REST de CAP (el objeto como segundo argumento no
-  // garantiza serialización como query params)
+
   const parametros = new URLSearchParams({
     status         : "READY",
     recipientUsers : usuario,
     "$orderby"     : "createdAt desc",
     "$top"         : "100",
   });
- 
+
   const tareas = await conTimeoutBpa(
     svc.get(`/task-instances?${parametros.toString()}`), "getInboxTasks");
- 
+
   LOG.info(`getInboxTasks OK | usuario=${usuario} tareas=${tareas?.length ?? 0}`);
   return Array.isArray(tareas) ? tareas : [];
 }
 
-// ─── LISTAR TAREAS EN CURSO (TODOS LOS USUARIOS) ──────────────────────────────
-
 /**
- * Lista las tareas de aprobación en curso (READY o RESERVED) de TODOS los
- * usuarios, sin filtrar por recipientUsers. Usada por la app de reasignación
- * para que un administrador pueda ver y reasignar tareas ajenas.
+ * Tareas de aprobación en curso (READY o RESERVED) de todos los usuarios.
+ * Usada por la app de reasignación. Requiere el role collection
+ * "WorkflowAdmin" en la identidad del destino BPA_WORKFLOW.
  *
- * IMPORTANTE: a diferencia de getInboxTasks(), esta consulta requiere que la
- * IDENTIDAD detrás del destino BPA_WORKFLOW (no el destino en sí — los role
- * collections se asignan a identidades, nunca a un destino) tenga el role
- * collection "WorkflowAdmin" en el subaccount de Process Automation. Sin él,
- * BPA solo devuelve tareas del propio usuario autenticado.
- * Pendiente de confirmar con el administrador del subaccount de BPA: el
- * destino actual (sap_process_automation_service, vía cds bind) autentica
- * como un cliente OAuth técnico (client credentials) — falta verificar si
- * WorkflowAdmin puede otorgarse a ese principal técnico o si esta llamada
- * exige el token de un usuario de negocio real con el rol asignado.
- *
- * Endpoint verificado: GET /public/workflow/rest/v1/task-instances
- *
- * @returns {Promise<Array>} Lista combinada de tareas BPA sin transformar (READY + RESERVED)
+ * @returns {Promise<Array>} tareas BPA sin transformar (READY + RESERVED)
  */
 async function listarTareasEnCurso() {
   const svc = await getSvc();
@@ -112,18 +71,11 @@ async function listarTareasEnCurso() {
   return todas;
 }
 
-// ─── OBTENER TAREA INDIVIDUAL ─────────────────────────────────────────────────
-
 /**
- * Obtiene una tarea individual del BPA por su ID.
- * Necesaria en la ruta Object Page para conocer el activityId (taskDefinitionId)
- * del que se derivan los flags de visibilidad por rol (perfiles.calcularFlagsRol).
- *
- * Endpoint verificado en SPA_Workflow_Runtime.json:
- *   GET /v1/task-instances/{taskInstanceId}
- *
- * @param {string} taskId - ID de la tarea BPA (campo "id" del TaskInstance)
- * @returns {Promise<object|null>} TaskInstance completo (incluye activityId) o null si falla
+ * Obtiene una tarea BPA por su ID, incluye activityId (taskDefinitionId).
+ * GET /v1/task-instances/{taskInstanceId}
+ * @param {string} taskId
+ * @returns {Promise<object|null>} TaskInstance completo, o null si falla
  */
 async function obtenerTarea(taskId) {
   const svc = await getSvc();
@@ -137,26 +89,13 @@ async function obtenerTarea(taskId) {
   }
 }
 
-// ─── LEER CONTEXTO ────────────────────────────────────────────────────────────
-
 /**
- * Lee el contexto de una tarea BPA.
- * Origen legado: ContextModel.readContext(taskId) en Detail.controller.js
+ * Lee el contexto de una tarea BPA, incluida la rama `custom` (variables
+ * personalizadas: notificación a Payroll y quórum de apoderados).
+ * GET /v1/task-instances/{taskId}/context
  *
- * Endpoint verificado en SPA_Workflow_Runtime.json:
- *   GET /v1/task-instances/{taskId}/context
- *
- * Retorna el objeto contexto del BPA con la PropuestaNomina anidada según el
- * proceso (startEvent.propuesta o startEvent.body — ver perfiles.ROLES_BPA).
- *
- * Incluye también la rama `custom` — las variables personalizadas de la
- * instancia—, que es de donde salen el resultado de la notificación a Payroll y
- * el estado del quórum de apoderados. Por eso NO hace falta un método aparte
- * contra /workflow-instances/{id}/context: el contexto de la tarea ya trae el
- * de su instancia, y este endpoint no necesita resolver ningún processInstanceId.
- *
- * @param {string} taskId - ID de la tarea BPA (campo "id" del TaskInstance)
- * @returns {Promise<object|null>} Contexto de la tarea o null si falla
+ * @param {string} taskId
+ * @returns {Promise<object|null>} contexto de la tarea o null si falla
  */
 async function readContext(taskId) {
   const svc = await getSvc();
@@ -170,32 +109,15 @@ async function readContext(taskId) {
   }
 }
 
-// ─── COMPLETAR TAREA ──────────────────────────────────────────────────────────
-
 /**
- * Completa una user task del Inbox de BPA con su decision y contexto actualizado.
+ * Completa una user task del inbox con su decisión y contexto actualizado.
+ * PATCH /v1/task-instances/{taskId}. El `status` de la respuesta se propaga
+ * al llamador: 404/409 distingue una carrera de firmas de un fallo técnico.
  *
- * El payload sigue el schema UpdateTaskInstancePayload del API oficial:
- *   - status   : siempre "COMPLETED" (la ruta del flujo la decide la decision,
- *                no el status — "FAILED" del legado era incorrecto)
- *   - decision : ID real del botón del formulario BPA, resuelto por
- *                perfiles.resolverDecision() (ej. "aprobar", "approve", "cancel")
- *   - context  : contexto BPA con la PropuestaNomina anidada según el proceso
- *
- * Endpoint verificado en SPA_Workflow_Runtime.json:
- *   PATCH /v1/task-instances/{taskId}
- *
- * El `status` de la respuesta de BPA se PROPAGA al llamador. Es lo que permite
- * distinguir un fallo técnico de la carrera entre dos apoderados del pool: con
- * el quórum de v1.2.0 la tarea es una sola y el primero que la completa la cierra
- * para el resto, así que el segundo recibe 404/409 de BPA. Eso no es un error de
- * sistema, es un mensaje de negocio ("otro apoderado se te adelantó") y la capa
- * de dominio necesita el código para decirlo así. Ver aprobacion.service.js.
- *
- * @param {string} taskId            - ID de la user task BPA
+ * @param {string} taskId
  * @param {object} opciones
- * @param {string} opciones.decision - ID de decision del formulario BPA
- * @param {object} opciones.contexto - Contexto a escribir al completar
+ * @param {string} opciones.decision - ID de decisión del formulario BPA
+ * @param {object} opciones.contexto - contexto a escribir al completar
  * @returns {Promise<{ success: boolean, mensaje: string, status: number|null }>}
  */
 async function completarTarea(taskId, { decision, contexto }) {
@@ -216,14 +138,7 @@ async function completarTarea(taskId, { decision, contexto }) {
   }
 }
 
-/**
- * Extrae el código HTTP de un error de un servicio remoto de CAP.
- *
- * No hay una sola propiedad fiable: según por dónde falle, el código llega en
- * `status`, en `code` (a veces como texto) o en la respuesta cruda. Se prueban
- * las tres en vez de asumir una, y se devuelve null si ninguna trae un número —
- * mejor "no se sabe" que un 0 que el llamador interpretaría como código real.
- */
+/** Extrae el código HTTP de un error de un servicio remoto CAP, o null si no hay uno fiable. */
 function _codigoHttp(error) {
   const candidatos = [error?.status, error?.statusCode, error?.response?.status, error?.code];
   for (const candidato of candidatos) {
@@ -233,39 +148,23 @@ function _codigoHttp(error) {
   return null;
 }
 
-// ─── REASIGNAR TAREA A OTRO USUARIO ───────────────────────────────────────────
-
 /**
- * Reemplaza los destinatarios (recipientUsers) de una tarea BPA. Usada por la
- * app de reasignación cuando un destinatario original no está disponible.
+ * Reemplaza los destinatarios (recipientUsers) de una tarea BPA. Admite
+ * varios destinatarios (pool de apoderados/liberador): quien llama compone la
+ * lista completa ya sustituida, aquí solo se serializa como CSV. Requiere el
+ * role collection "WorkflowAdmin" en la identidad del destino.
  *
- * ADMITE VARIOS DESTINATARIOS, y eso no es un extra: desde el quórum de v1.2.0
- * la tarea de apoderado es una sola con un POOL de N destinatarios. Reasignar
- * enviando un único correo la dejaría con un solo destinatario y expulsaría del
- * flujo a los apoderados que no habían firmado todavía. Quien llama compone la
- * lista completa ya sustituida; aquí solo se serializa.
+ * PATCH /v1/task-instances/{taskInstanceId}
  *
- * IMPORTANTE: requiere que la IDENTIDAD detrás del destino BPA_WORKFLOW
- * (el role collection se asigna a esa identidad, no al destino) tenga el
- * role collection "WorkflowAdmin" en el subaccount de Process Automation —
- * sin él, BPA rechaza el PATCH con 403. Ver nota de verificación pendiente
- * en listarTareasEnCurso() sobre si esto exige un usuario de negocio real
- * en vez del cliente OAuth técnico del destino actual.
- *
- * Endpoint verificado: PATCH /public/workflow/rest/v1/task-instances/{taskInstanceId}
- *
- * @param {string} taskId              - ID de la tarea BPA
+ * @param {string} taskId
  * @param {string|string[]} destinatarios - correo, CSV o array de correos
  * @returns {Promise<{ success: boolean, mensaje: string, status: number|null }>}
  */
 async function reasignarTarea(taskId, destinatarios) {
   const svc = await getSvc();
 
-  // recipientUsers es un string simple en el schema de BPA, NO un array
-  // — enviarlo como array dispara "Unable to parse the request content
-  // because it has an unexpected format or structure". Varios destinatarios
-  // van en ese mismo string separados por coma, igual que hace el binding de
-  // BPA con context.custom.apoderadospendientes.
+  // recipientUsers es un string en el schema de BPA, no un array; varios
+  // destinatarios van separados por coma en ese mismo string.
   const lista = (Array.isArray(destinatarios) ? destinatarios : [destinatarios])
     .flatMap(entrada => String(entrada ?? "").split(","))
     .map(correo => correo.trim())
@@ -286,17 +185,10 @@ async function reasignarTarea(taskId, destinatarios) {
   }
 }
 
-// ─── CONTEXTO DE UNA INSTANCIA EN CURSO ───────────────────────────────────────
-
 /**
- * Lee el contexto de una INSTANCIA de workflow (no el de una tarea).
- *
- * No es lo mismo que readContext(taskId), aunque se parezcan: aquel devuelve el
- * contexto tal y como lo ve la tarea, y este el de la instancia, que es el que
- * escribe actualizarContextoInstancia(). Para un ciclo leer-modificar-escribir
- * hay que leer del MISMO sitio donde se va a escribir.
- *
- * Endpoint: GET /v1/workflow-instances/{workflowInstanceId}/context
+ * Lee el contexto de una instancia de workflow (no el de una tarea) — el
+ * mismo que escribe actualizarContextoInstancia.
+ * GET /v1/workflow-instances/{workflowInstanceId}/context
  *
  * @param {string} instanceId - workflowInstanceId del TaskInstance
  * @returns {Promise<object|null>} contexto de la instancia o null si falla
@@ -314,32 +206,10 @@ async function leerContextoInstancia(instanceId) {
 }
 
 /**
- * Actualiza el contexto de una instancia de workflow EN CURSO.
- *
- * POR QUÉ HACE FALTA
- * ------------------
- * Reasignar con PATCH /task-instances/{id} cambia los destinatarios de esa
- * INSTANCIA DE TAREA y nada más. Las variables de las que BPA saca los
- * destinatarios al CREAR la tarea (custom.apoderadospendientes) siguen con el
- * usuario anterior, con dos consecuencias que se ven en la app de reasignación:
- *
- *   · el sustituido reaparece en la pantalla y en el diagrama, porque esas
- *     variables son la fuente de la que la app compone los firmantes;
- *   · si el flujo hace loop back —rechazo de Payroll, o la siguiente firma del
- *     quórum— BPA recrea la tarea desde la variable y la reasignación se pierde.
- *
- * SEMÁNTICA DE LA MEZCLA: el PATCH sustituye las claves de PRIMER NIVEL que se
- * le envían; no hace merge en profundidad. Enviar { custom: { unaVariable } }
- * borraría el resto de `custom`. Por eso quien llama debe leer el contexto
- * entero, modificar la hoja que le interesa y devolver la rama de primer nivel
- * COMPLETA. Ver _persistirDestinatarios en domain/reasignacion.service.js.
- *
- * Endpoint: PATCH /v1/workflow-instances/{workflowInstanceId}/context
- *
- * REQUIERE el role collection "WorkflowAdmin" en la identidad del destino, igual
- * que reasignarTarea(). Si el subaccount no lo tiene concedido, esta llamada
- * falla con 403 y quien llama debe degradar sin romper la reasignación: la tarea
- * actual ya quedó reasignada y el sustituto puede trabajar.
+ * Actualiza el contexto de una instancia de workflow en curso.
+ * PATCH /v1/workflow-instances/{workflowInstanceId}/context — sustituye las
+ * claves de primer nivel que recibe, sin merge en profundidad: quien llama
+ * debe enviar la rama completa. Requiere "WorkflowAdmin" en el destino.
  *
  * @param {string} instanceId - workflowInstanceId del TaskInstance
  * @param {object} parche     - ramas de primer nivel del contexto, completas
@@ -358,19 +228,12 @@ async function actualizarContextoInstancia(instanceId, parche) {
   }
 }
 
-// ─── INICIAR INSTANCIA ────────────────────────────────────────────────────────
-
 /**
- * Inicia una nueva instancia de workflow BPA.
- * La usa el Analista al enviar el lote: arranca el proceso aprobacionDeNomina
- * (perfiles.PROCESOS.aprobacionDeNomina.definitionId).
+ * Inicia una nueva instancia de workflow BPA (arranca el proceso al enviar el lote).
+ * POST /v1/workflow-instances — Body: { definitionId, context }
  *
- * Endpoint verificado en SPA_Workflow_Runtime.json:
- *   POST /v1/workflow-instances
- *   Body: { definitionId, context }
- *
- * @param {string} definitionId - ID cualificado del workflow (perfiles.PROCESOS)
- * @param {object} contexto     - Contexto inicial con la PropuestaNomina anidada
+ * @param {string} definitionId - ID cualificado del workflow
+ * @param {object} contexto     - contexto inicial con la PropuestaNomina anidada
  * @returns {Promise<{ success: boolean, mensaje: string, instanceId: string|null }>}
  */
 async function iniciarInstancia(definitionId, contexto) {
@@ -393,17 +256,10 @@ async function iniciarInstancia(definitionId, contexto) {
   }
 }
 
-// ─── OBTENER ESTADO DE INSTANCIA ──────────────────────────────────────────────
-
 /**
  * Obtiene el estado de una instancia de workflow BPA.
- * Útil para encadenar aprobacionFinal tras el fin de aprobacionDeNomina y
- * para diagnosticar instancias ERRONEOUS durante el desarrollo.
- *
- * Endpoint verificado en SPA_Workflow_Runtime.json:
- *   GET /v1/workflow-instances/{workflowInstanceId}
- *
- * @param {string} instanceId - ID de la instancia de workflow
+ * GET /v1/workflow-instances/{workflowInstanceId}
+ * @param {string} instanceId
  * @returns {Promise<object|null>} WorkflowInstance (incluye status) o null si falla
  */
 async function obtenerEstadoInstancia(instanceId) {
@@ -418,18 +274,10 @@ async function obtenerEstadoInstancia(instanceId) {
   }
 }
 
-// ─── CERRAR FLUJO ─────────────────────────────────────────────────────────────
-
 /**
  * Cancela la instancia de workflow completa.
- * Origen legado: Supervisor.js → cerrarFlujo()
- *
- * Endpoint verificado en SPA_Workflow_Runtime.json:
- *   PATCH /v1/workflow-instances/{instanceId}
- *   Body: { status: "CANCELED" }
- *
- * @param {string} instanceId - workflowInstanceId del TaskInstance
- * @returns {Promise<{ success: boolean, mensaje: string }>}
+ * PATCH /v1/workflow-instances/{instanceId} — Body: { status: "CANCELED" }
+ * @param {string} instanceId
  */
 async function cerrarFlujo(instanceId) {
   const svc = await getSvc();

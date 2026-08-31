@@ -1,19 +1,11 @@
-// =============================================================================
-// srv/pagos-service.cds
+// Definición de dominio: entidades, tipos y acciones del servicio H2H Nómina.
+// No contiene anotaciones @UI (viven en app/ui5-aprobaciones/annotations.cds)
+// ni lógica de negocio (vive en pagos-service.js / domain/aprobacion.service.js).
 //
-// DEFINICIÓN de dominio: entidades, tipos y acciones del servicio H2H Nómina.
-// NO contiene anotaciones @UI (viven en app/ui5-aprobaciones/annotations.cds).
-// NO contiene lógica de negocio (vive en pagos-service.js / aprobacion.service.js).
-//
-// Estado BPA v1.2.0 (H2H Nomina 1.4.0):
-//   Roles activos en flujo: Apoderado (pool con quórum de 2), Liberador.
-//   Coordinador: anulado en v1.1.0 — acciones conservadas para uso futuro.
-// =============================================================================
+// Roles activos en flujo: Apoderado (pool con quórum de 2), Liberador.
+// Coordinador: no activo — acciones conservadas para uso futuro.
 
-// =============================================================================
-// Tipo: PropuestaNomina (fuente de verdad = DataType BPA aprobacionDeNomina)
-// Verificado contra el DataType del despliegue H2H Nomina 1.4.0.
-// =============================================================================
+// Tipo PropuestaNomina — fuente de verdad: DataType BPA aprobacionDeNomina.
 type PropuestaNomina {
     // Identificación del lote
     sociedad               : String;
@@ -21,7 +13,7 @@ type PropuestaNomina {
     version                : String;
     modalidadPP            : String;
     tipoNomina             : String;    // PPP en el tituloTarea
-    tipoTrabajador         : String;    // E = Empleado, P = Pensionista
+    tipoTrabajador         : String;    // E = Empleados, P = Practicantes
     subdivision            : String;    // Aplica solo en AESA
 
     // Datos de pago
@@ -34,43 +26,37 @@ type PropuestaNomina {
 
     // Fechas y título
     fechaPropuestaPago     : String;    // formato yyyy-MM-dd
-    fechaPago              : String;    // formato yyyy-MM-dd — añadido en el DataType 1.4.0
+    fechaPago              : String;    // formato yyyy-MM-dd
     tituloTarea            : String;    // "SSSS – DD/MM/AAAA - PPP - BBBB – X - MMM[ - DDDD]"
 
     // Control documental
     existeDocumento        : Boolean;
     contadorFirma          : Integer;
-    cantidad               : Integer;   // Cant. Registros — añadido en el DataType 1.4.8
+    cantidad               : Integer;   // Cant. Registros
 
     // Usuarios — strings individuales, sin arrays
     analista               : String;    // email consolidado del analista
     usuarioCreacion        : String;
-    usuarioRevisor         : String;    // añadido en el DataType 1.4.8
+    usuarioRevisor         : String;
     correoAnalista         : String;
     usuarioCoordinador     : String;    // reservado para uso futuro
 
-    // Lista de apoderados habilitados para firmar esta propuesta.
-    // CSV de correos en minúsculas, sin espacios y sin coma final — el formato
-    // que BPA normaliza en el script `inicializarApoderados` y con el que
-    // alimenta el pool de destinatarios de la tarea de apoderado.
-    // Payroll garantiza que trae al menos 2.
+    // Apoderados habilitados para firmar esta propuesta. CSV de correos en
+    // minúsculas; Payroll garantiza que trae al menos 2.
     usuariosApoderados     : String;
 
-    // LEGADO — dos apoderados fijos, uno por rama paralela. Siguen en el
-    // DataType de BPA por compatibilidad, pero quedaron FUERA del flujo activo
-    // con el quórum de v1.2.0 y CPI ya no debe mapearlos. No usar para
-    // autorizar ni para pintar: la lista buena es usuariosApoderados.
+    // Legado: dos apoderados fijos, uno por rama paralela. Fuera del flujo
+    // activo — no usar para autorizar ni para pintar; usar usuariosApoderados.
     usuarioApoderado1      : String;
     usuarioApoderado2      : String;
 
-    // Uno o VARIOS liberadores, en el mismo formato CSV que usuariosApoderados:
-    // BPA reparte esa lista como destinatarios de la tarea de liberación y basta
-    // una sola liberación para cerrar el paso (ver srv/config/perfiles.js).
+    // Uno o varios liberadores, mismo formato CSV que usuariosApoderados;
+    // basta una sola liberación para cerrar el paso (ver srv/config/perfiles.js).
     usuarioLiberador       : String;
 
     usuarioCaja            : String;
 
-    // Flags de estado (legado — no usados para visibilidad en UI v1.1.0+)
+    // Flags de estado (legado — no usados para visibilidad en la UI actual)
     tieneAnalista          : Boolean;
     estaConforme           : Boolean;
     estaAprobado           : Boolean;
@@ -78,58 +64,44 @@ type PropuestaNomina {
     estaTerminado          : Boolean;
     estaAnulado            : Boolean;
 
-    // Campos escritos por CPI/BPA en el contexto de la tarea
-    //
-    // perfil: literal IpPerfil que Payroll recibe. Transporta el SLOT DE FIRMA
-    // ("1" primera de apoderado, "2" segunda, "3" liberador), no un perfil por
-    // usuario. Para los apoderados lo calcula BPA en tiempo de ejecución
-    // (custom.perfilfirma), así que CAP no lo envía nunca — ver perfiles.js.
+    // Campos escritos por CPI/BPA en el contexto de la tarea. `perfil`
+    // transporta el slot de firma ("1"/"2" apoderado, "3" liberador), no un
+    // perfil por usuario; CAP no lo envía para apoderados (ver perfiles.js).
     perfil                 : String;
     comentario             : String;    // comentario libre del firmante
     taskInstanceId         : String;    // ID usado por CPI para mapear el proceso
 };
 
-// =============================================================================
-// Tipo: resultado estándar de las acciones de aprobación
-// =============================================================================
+/** Resultado estándar de las acciones de aprobación. */
 type AccionResult {
     exito   : Boolean;
     mensaje : String;
 };
 
-// =============================================================================
-// Servicio principal
-// =============================================================================
 service PagosService @(path: '/nomina/aprobaciones') {
 
-    // =========================================================================
-    // Entidad principal: TareasInbox
     // Lista y detalle de tareas pendientes del usuario autenticado.
     // Clave: instanceID = campo "id" de la API de tasks de BPA Workflow.
-    // =========================================================================
     @cds.persistence.skip
     entity TareasInbox {
-        // Clave única de la tarea BPA
         key instanceID          : String(255);
 
         // Campos del List Report
         tituloTarea             : String(255);
         banco                   : String(50);
+        bancoDescripcion        : String(100);  // descripción del banco ("001 - BCP Soles")
 
-        // importe/moneda son los valores crudos del contexto BPA — se conservan
-        // para trazabilidad y para cualquier cálculo. Lo que se MUESTRA es
-        // importeTexto, ya formateado por CAP con la convención peruana
-        // ("S/ 43,038.69"): ver _formatearImporte en pagos-service.js.
+        // "Grupo Pers." del formulario, derivado de tipoTrabajador (E/P) por
+        // config/grupos-personal.js.
+        grupoPersonal           : String(30);
+
+        // importe/moneda son los valores crudos del contexto BPA. Lo que se
+        // muestra es importeTexto, formateado por CAP ("S/ 43,038.69").
         importe                 : String(30);
         moneda                  : String(5);
         importeTexto            : String(30);
         sociedad                : String(10);
         numeroPropuesta         : String(20);
-        // Date (no String): así el filtro de Fiori Elements pinta un DatePicker
-        // con calendario en vez de un campo de texto libre. El contexto BPA ya
-        // entrega estos valores en ISO (yyyy-MM-dd) — ver PropuestaNomina más
-        // arriba — que es exactamente el formato de Edm.Date, así que no hace
-        // falta convertir nada en _extraerPropuesta.
         fechaPropuestaPago      : Date;
         fechaPago               : Date;
         estadoTarea             : String(20);       // READY | RESERVED
@@ -137,7 +109,7 @@ service PagosService @(path: '/nomina/aprobaciones') {
 
         // Campos del Object Page — escalares de la propuesta
         estadoPP                : String(50);
-        estadoCriticidad        : Integer;    // UI.CriticalityType: 0=Neutral 1=Negative 2=Critical 3=Positive — controla color/ícono de estadoPP
+        estadoCriticidad        : Integer;    // UI.CriticalityType: 0=Neutral 1=Negative 2=Critical 3=Positive
         urlPDF                  : String(500);
         modalidadPP             : String(20);
         viaPago                 : String(5);
@@ -148,68 +120,44 @@ service PagosService @(path: '/nomina/aprobaciones') {
         indicadorPagoAdelanto   : String(5);
         existeDocumento         : Boolean;
         contadorFirma           : Integer;
-        cantidad                : Integer;          // "Cant. Registros" — DataType 1.4.8
+        cantidad                : Integer;          // "Cant. Registros"
         analista                : String(100);
         usuarioCreacion         : String(100);
-        usuarioRevisor          : String(100);       // "Revisado por" — DataType 1.4.8
+        usuarioRevisor          : String(100);       // "Revisado por"
         correoAnalista          : String(100);
-        // Lista, no un correo: Payroll puede designar varios liberadores y el
-        // servicio la entrega normalizada y separada por ", ". 1000 y no 100 por
-        // el mismo motivo que usuariosApoderados — cuatro correos ya se pasan de
-        // 100 caracteres, y el recorte silencioso dejaría una lista mentirosa.
-        usuarioLiberador        : String(1000);
+        usuarioLiberador        : String(1000);      // lista de liberadores, separada por ", "
         usuarioCoordinador      : String(100);      // reservado para uso futuro
         usuarioCaja             : String(100);
         estaAnulado             : Boolean;
         estaTerminado           : Boolean;
 
-        // ── Quórum de apoderados (BPA v1.2.0) ────────────────────────────────
-        // Los apoderados son una LISTA de N usuarios equivalentes y bastan DOS
-        // firmas cualesquiera para avanzar al Liberador. La tarea es una sola,
-        // con pool de destinatarios, y reaparece por loop back hasta el quórum.
-        //
-        // Origen: usuariosApoderados de la propuesta + context.custom.* que BPA
-        // recalcula en cada firma (ver perfiles.resolverQuorumApoderados).
+        // ── Quórum de apoderados ─────────────────────────────────────────────
+        // Los apoderados son una lista de N usuarios equivalentes; bastan dos
+        // firmas cualesquiera para avanzar al Liberador (tarea única con pool
+        // de destinatarios). Origen: usuariosApoderados + context.custom.* que
+        // BPA recalcula en cada firma (ver perfiles.resolverQuorumApoderados).
 
-        // Lista completa de apoderados habilitados — CSV de correos.
-        usuariosApoderados      : String(1000);
+        usuariosApoderados      : String(1000);     // lista completa habilitada
+        apoderadosFirmantes     : String(1000);     // quiénes ya firmaron
+        apoderadosPendientes    : String(1000);     // quiénes siguen pudiendo firmar
 
-        // Quiénes ya firmaron y quiénes siguen pudiendo hacerlo — CSV.
-        apoderadosFirmantes     : String(1000);
-        apoderadosPendientes    : String(1000);
-
-        // Estado del quórum. firmasRequeridas viene de BPA (custom.firmasrequeridas)
-        // y no se fija en CAP: es el punto de configuración para escalar a "M de N".
         contadorFirmasApoderados: Integer;
-        firmasRequeridas        : Integer;
+        firmasRequeridas        : Integer;          // viene de BPA (custom.firmasrequeridas)
 
-        // "1 de 2 firmas" — ya compuesto por CAP, igual que importeTexto y las
-        // fechas del historial: el frontend enlaza, no calcula. Vacío cuando la
-        // tarea no es de apoderado, para que la UI pueda ocultarlo sin lógica.
-        firmasTexto             : String(40);
+        firmasTexto             : String(40);       // "1 de 2 firmas", ya compuesto por CAP
 
-        // true cuando ECP no confirmó ninguna firma de esta propuesta y el
-        // diagrama muestra solo el flujo PREVISTO — sin firmantes ni fechas
-        // reales. Ocurre si el iFlow no responde o si la propuesta aún no tiene
-        // firmas. El Object Page lo usa para mostrar un aviso; pasa a false solo
-        // en cuanto ECP devuelve una firma utilizable.
+        // true cuando ECP no confirmó ninguna firma y el diagrama muestra solo
+        // el flujo previsto (sin firmantes ni fechas reales).
         historialEsDemo         : Boolean;
 
-        // Resultado de la notificación a Payroll (ECP vía CPI) del intento anterior.
-        // BPA notifica a Payroll al decidir; si Payroll rechaza, el flujo hace loop
-        // back y la tarea REAPARECE en el inbox. Estos campos explican por qué.
-        // Origen: context.custom.* del contexto BPA (ver perfiles.resolverCamposNotificacion).
-        // Vacíos en el primer intento — solo se pueblan tras un rechazo de Payroll.
+        // Resultado de la notificación a Payroll (ECP vía CPI) del intento
+        // anterior; vacíos hasta el primer rechazo (ver
+        // perfiles.resolverCamposNotificacion).
         notifTieneError         : Boolean;          // true si Payroll devolvió EpFlagError = "X"
         notifMensaje            : String(500);      // EpMensaje — texto de negocio de Payroll
         notifCriticidad         : Integer;          // UI.CriticalityType: 1=Negative si hay error, 0=Neutral
 
         // Flags de visibilidad por rol — calculados por perfiles.calcularFlagsRol()
-        // XSUAA + taskDefinitionId son la única fuente de verdad del rol.
-        //
-        // esApoderado1/esApoderado2 desaparecieron con el quórum de v1.2.0: ya
-        // no hay dos tareas de apoderado que distinguir, sino una con pool. Qué
-        // slot de firma ocupa cada usuario lo decide BPA al completarla.
         esApoderado             : Boolean;          // taskDefinitionId = form_aprobacionDelApoderado_1
         esLiberador             : Boolean;          // taskDefinitionId = form_aprobacionLiberadorFinal_1
         esCoordinador           : Boolean;          // siempre false en flujo activo
@@ -220,8 +168,7 @@ service PagosService @(path: '/nomina/aprobaciones') {
         adjuntos                : Composition of many Adjunto
                                     on adjuntos.instanceID = instanceID;
 
-        // Historial de aprobaciones renderizado como sap.suite.ui.commons.ProcessFlow.
-        // Son las DOS agregaciones que el control necesita, ya calculadas por CAP:
+        // Historial de aprobaciones renderizado como sap.suite.ui.commons.ProcessFlow:
         //   niveles     → lanes (columnas del diagrama)
         //   aprobadores → nodes (tarjetas de firmante)
         niveles                 : Composition of many NivelAprobacion
@@ -230,65 +177,59 @@ service PagosService @(path: '/nomina/aprobaciones') {
                                     on aprobadores.instanceID = instanceID;
     };
 
-    // =========================================================================
-    // Acciones bound de TareasInbox
-    // Sintaxis CDS 9.x: extend entity X with actions { ... }
-    // =========================================================================
+    // Acciones bound de TareasInbox (sintaxis CDS 9.x).
     extend entity TareasInbox with actions {
 
         // Apoderado (pool con quórum de 2) — contexto BPA: startEvent.body
         // Visibilidad: esApoderado = true | Decisiones: aprobar | rechazar
-        //
-        // Un mismo usuario solo puede aprobar UNA vez: al firmar, BPA lo saca
-        // del pool y CAP rechaza (403) a quien ya no está en él. Ver
-        // perfiles.esApoderadoAutorizado y aprobacion.service._prepararAccion.
-        //
-        // Regla de negocio BPA: Aprobar/Liberar NO llevan parámetro → Fiori
-        // Elements los ejecuta directamente. Rechazar/Anular llevan
-        // (comentario: String) → FE genera automáticamente el diálogo de
-        // parámetro para capturar el motivo antes de invocar la acción.
+        // Un usuario que ya firmó sale del pool y CAP rechaza (403) una
+        // segunda firma (ver perfiles.esDestinatarioAutorizado).
 
-        // El apoderado confirma la propuesta de nómina (ejecución directa)
+        /** El apoderado confirma la propuesta de nómina. */
         action apoderadoAprobar()                     returns AccionResult;
 
-        // El apoderado rechaza la propuesta y la devuelve al analista con un motivo.
-        // Renombrada desde apoderadoObservar: BPM H2H Nomina 1.5.0 cambió el
-        // outcome del formulario de apoderado de "Observar" a "Rechazar"
-        // (mismo id "rechazar" que espera BPA al completar la tarea).
+        /** El apoderado rechaza la propuesta y la devuelve al analista con un motivo. */
         action apoderadoRechazar(comentario: String) returns AccionResult;
 
         // Liberador Final (LI) — contexto BPA: startEvent.propuesta
         // Visibilidad: esLiberador = true | Decisiones: liberar | rechazar | anular
 
-        // El liberador autoriza el desembolso de la nómina
+        /** El liberador autoriza el desembolso de la nómina. */
         action liberadorLiberar()                     returns AccionResult;
 
-        // El liberador rechaza la propuesta (regresa al flujo de apoderados)
+        /** El liberador rechaza la propuesta (regresa al flujo de apoderados). */
         action liberadorRechazar(comentario: String) returns AccionResult;
 
-        // El liberador anula definitivamente la propuesta de nómina
+        /** El liberador anula definitivamente la propuesta de nómina. */
         action liberadorAnular(comentario: String)   returns AccionResult;
 
-        // Coordinador (CO) — ANULADO en BPA v1.1.0, reservado para uso futuro
-        // Visibilidad: siempre false (esCoordinador = false en el handler)
-        // No mostrar en la UI mientras el flujo activo no incluya CO.
+        // Acciones masivas del List Report — un solo par de botones para los
+        // dos roles, porque la toolbar no puede ocultar botones por fila.
+        // Resuelven la decisión BPA a partir del taskDefinitionId de cada
+        // tarea y desembocan en el mismo camino que las acciones por rol
+        // (_prepararAccion → _completar).
+        //   Apoderado → aprobar | rechazar
+        //   Liberador → liberar | rechazar
+        // Anular no tiene equivalente masivo: cierra el proceso sin vuelta atrás.
 
-        // [FUTURO] El coordinador valida y envía al flujo de apoderados
+        /** Aprueba (apoderado) o libera (liberador) la tarea seleccionada. */
+        action aprobarMasivo()                        returns AccionResult;
+
+        /** Rechaza la tarea seleccionada, sea de apoderado o de liberador. */
+        action rechazarMasivo(comentario: String)     returns AccionResult;
+
+        // Coordinador (CO) — no activo en el flujo (esCoordinador = false siempre)
+
+        /** [FUTURO] El coordinador valida y envía al flujo de apoderados. */
         action coordinadorAprobar(comentario: String)  returns AccionResult;
 
-        // [FUTURO] El coordinador rechaza el lote de nómina
+        /** [FUTURO] El coordinador rechaza el lote de nómina. */
         action coordinadorRechazar(comentario: String) returns AccionResult;
     };
 
-    // =========================================================================
-    // Lista de valores del filtro "Estado" del List Report
-    //
-    // No es una tabla ni un maestro: es la proyección de config/estados.js, la
-    // misma tabla de la que sale el estadoPP de cada tarea. La clave es el
-    // TEXTO y no un código porque TareasInbox.estadoPP transporta el texto —
-    // el $filter compara sobre él, así que la lista de valores tiene que
-    // ofrecer exactamente esa cadena.
-    // =========================================================================
+    // Lista de valores del filtro "Estado" del List Report — proyección de
+    // config/estados.js. La clave es el texto porque TareasInbox.estadoPP
+    // transporta el texto y el $filter compara sobre él.
     @readonly
     @cds.persistence.skip
     entity EstadosPropuesta {
@@ -296,26 +237,13 @@ service PagosService @(path: '/nomina/aprobaciones') {
             criticidad  : Integer;          // UI.CriticalityType — color del estado
     };
 
-    // =========================================================================
-    // PropuestaPDF — el documento de la propuesta como entidad media
-    //
-    // Existe para que el frontend tenga una URL que devuelva BYTES: sap.m.PDFViewer
-    // monta un <iframe> sobre ella y el visor nativo del navegador la renderiza.
-    // Por eso NO se modela como función que devuelva base64 — obligaría a armar un
-    // blob en el cliente y a duplicar en memoria un documento que puede pesar MB.
-    //
-    // La clave es la terna que identifica la propuesta en SAP —
-    // '<numeroPropuesta>-<sociedad>-<yyyy-MM-dd>' — y no el instanceID de BPA:
-    // son esos tres campos los que identifican el documento en SAP —y los que
-    // viajarán al iFlow de CPI que lo entrega—, y la misma terna con la que
-    // reasignacion-service.js agrupa tareas (ver _clavePropuesta).
-    // TareasInbox.urlPDF la construye ya armada.
-    //
-    // @Core.MediaType + @Core.ContentDisposition.Type: 'inline' son lo que hace
-    // que el navegador MUESTRE el PDF en vez de descargarlo: con el disposition
-    // por defecto ('attachment') el iframe del visor dispararía una descarga y
-    // quedaría en blanco.
-    // =========================================================================
+    // PropuestaPDF — el documento como entidad media: sap.m.PDFViewer monta un
+    // <iframe> sobre su URL y el navegador la renderiza (por eso no es una
+    // función que devuelva base64). La clave es la terna que identifica la
+    // propuesta en SAP ('<numeroPropuesta>-<sociedad>-<yyyy-MM-dd>'), la
+    // misma con la que reasignacion-service.js agrupa tareas.
+    // @Core.MediaType + ContentDisposition.Type: 'inline' hacen que el
+    // navegador muestre el PDF en vez de descargarlo.
     @readonly
     @cds.persistence.skip
     entity PropuestaPDF {
@@ -334,9 +262,7 @@ service PagosService @(path: '/nomina/aprobaciones') {
             contenido          : LargeBinary;
     };
 
-    // =========================================================================
-    // Composición: Proveedor — beneficiarios del lote de pago
-    // =========================================================================
+    /** Proveedor — beneficiarios del lote de pago. */
     @cds.persistence.skip
     entity Proveedor {
         key instanceID      : String(255);
@@ -349,9 +275,7 @@ service PagosService @(path: '/nomina/aprobaciones') {
         viaPago             : String(5);
     };
 
-    // =========================================================================
-    // Composición: Adjunto — documentos vinculados a la propuesta
-    // =========================================================================
+    /** Adjunto — documentos vinculados a la propuesta. */
     @cds.persistence.skip
     entity Adjunto {
         key instanceID      : String(255);
@@ -361,48 +285,28 @@ service PagosService @(path: '/nomina/aprobaciones') {
         fechaCarga          : String(20);
     };
 
-    // =========================================================================
-    // Composición: NivelAprobacion — lanes del ProcessFlow
-    //
-    // Un nivel = una columna del diagrama de flujo (Nivel 1 → Nivel 2 → …).
-    // NO viene de CPI: CAP lo DERIVA agrupando el historial por el campo `nivel`
-    // de cada firmante (ver historial.service.js → _derivarNiveles). El iFlow solo
-    // entrega filas planas; la topología del diagrama se calcula en CAP.
-    //
-    // Mapea 1:1 a sap.suite.ui.commons.ProcessFlowLaneHeader.
-    // =========================================================================
+    // NivelAprobacion — lanes del ProcessFlow. Un nivel = una columna del
+    // diagrama; CAP lo deriva agrupando el historial por el campo `nivel` de
+    // cada firmante (ver historial.service.js → _derivarNiveles). Mapea 1:1
+    // a sap.suite.ui.commons.ProcessFlowLaneHeader.
     @cds.persistence.skip
     entity NivelAprobacion {
         key instanceID      : String(255);
         key laneId          : String(20);       // 'N1' | 'N2' | … — enlaza con Aprobador.laneId
-        posicion            : Integer;          // 0-based y SECUENCIAL — requisito del control
-        texto               : String(60);       // etiqueta bajo el ícono: 'Nivel 1'
+        posicion            : Integer;          // 0-based y secuencial — requisito del control
+        texto               : String(60);       // etiqueta bajo el ícono
         descripcion         : String(60);       // rol del nivel: 'Apoderados'
         icono               : String(100);      // sap-icon://employee
 
-        // Estado agregado del nivel, en texto.
-        //
-        // El ANILLO de color de la cabecera no se transporta: lo calcula el propio
-        // ProcessFlow contando el estado de los nodos de cada lane y lo reescribe
-        // en cada render, así que enviarlo sería un campo muerto. Como esos estados
-        // de nodo los decide CAP, el color del nivel sigue saliendo de la lógica de
-        // negocio; el control solo hace el recuento.
-        //
-        // Lo que el control NO ofrece es el texto, y eso sí lo aporta CAP:
+        // El anillo de color de la cabecera lo calcula el propio ProcessFlow
+        // contando el estado de los nodos; CAP solo aporta el texto:
         estadoTexto         : String(120);      // '1 completado, 1 en curso'
         resumen             : String(180);      // 'Apoderados · 1 completado, 1 en curso' (tooltip)
     };
 
-    // =========================================================================
-    // Composición: Aprobador — historial de firmas de la propuesta (nodes)
-    //
-    // Cada fila es un nodo del ProcessFlow. Todos los campos de presentación
-    // (estadoNodo, decisionValueState, iniciales, hijos, fechaTexto) los calcula
-    // CAP en historial.service.js: el frontend solo enlaza propiedades, no
-    // interpreta reglas de negocio.
-    //
-    // Mapea 1:1 a sap.suite.ui.commons.ProcessFlowNode.
-    // =========================================================================
+    // Aprobador — historial de firmas de la propuesta (nodes). Cada fila es
+    // un nodo del ProcessFlow; todos los campos de presentación los calcula
+    // CAP en historial.service.js. Mapea 1:1 a sap.suite.ui.commons.ProcessFlowNode.
     @cds.persistence.skip
     entity Aprobador {
         key instanceID      : String(255);
@@ -411,11 +315,9 @@ service PagosService @(path: '/nomina/aprobaciones') {
         nivel               : Integer;          // 1-based, tal como llega del iFlow
         orden               : Integer;          // orden dentro del nivel (firmas paralelas)
 
-        // Aristas del grafo: nodeIds del/los nodo(s) siguiente(s), separados por coma.
-        // Se transporta como CSV y no como `array of String` a propósito: OData V4
-        // no permite enlazar una propiedad de colección a una propiedad de control
-        // (ODataPropertyBinding exige valores primitivos). El fragmento la convierte
-        // en array con un formatter de una línea (ext/util/Historial.js).
+        // Aristas del grafo: nodeIds del/los nodo(s) siguiente(s), CSV (OData V4
+        // no permite enlazar una colección a una propiedad de control; el
+        // fragmento la convierte en array con un formatter — ext/util/Historial.js).
         hijos               : String(200);
 
         // Identidad del firmante

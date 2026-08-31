@@ -1,43 +1,28 @@
 <!--
-    app/ui5-aprobaciones/webapp/ext/fragment/HistorialProcessFlow.fragment.xml
+    Sección personalizada del Object Page: "Historial de Aprobaciones",
+    registrada en manifest.json (routing > targets > TareasInboxObjectPage >
+    options > settings > content > body > sections). Reemplaza a la tabla que
+    antes generaba la faceta 'Aprobadores' por el diagrama de flujo de firmas.
 
-    Sección personalizada del Object Page: "Historial de Aprobaciones".
-    Se registra en manifest.json bajo
-      sap.ui5 > routing > targets > TareasInboxObjectPage > options > settings >
-      content > body > sections.
-
-    Reemplaza a la tabla que antes generaba la faceta 'Aprobadores' de
-    annotations.cds por el diagrama de flujo del proceso de firmas.
-
-    ── El fragmento NO tiene lógica ─────────────────────────────────────────────
-    Enlaza dos colecciones que CAP ya entrega calculadas (srv/domain/historial.service.js):
+    Enlaza dos colecciones que CAP ya entrega calculadas
+    (srv/domain/historial.service.js):
       niveles     → lanes  (columnas: Analista → Coordinador → Apoderados → Liberador)
       aprobadores → nodes  (tarjeta por firmante, con su estado ya resuelto)
-    Los únicos formatters son conversiones de tipo que OData V4 impide hacer en
-    el servidor; ver ext/util/Historial.js.
+    Los únicos formatters son conversiones de tipo que OData V4 impide hacer
+    en el servidor; ver ext/util/Historial.js.
 
-    ── Por qué la tarjeta se define CUATRO veces ────────────────────────────────
-    ProcessFlow es responsivo por diseño: _initZoomLevel() elige el nivel de zoom
-    según el ANCHO DEL PROPIO CONTROL, no el de la ventana —
-      < 600px → Four | 600-1023px → Three | >= 1024px → Two
-    — y cada nivel dibuja únicamente su propia agregación zoomLevel*Content. En la
-    columna media del FCL el control mide menos de 1024px, así que el nivel real
-    de esta app es Three la mayor parte del tiempo. Definir solo un nivel dejaba
-    la tarjeta sin usar y el nodo caía al render por defecto (solo el título).
-
-    Por eso cada nivel tiene su versión, con el detalle que su tamaño admite:
+    La tarjeta se define cuatro veces porque ProcessFlow elige su nivel de
+    zoom según el ANCHO DEL CONTROL, no de la ventana (< 600px → Four,
+    600-1023px → Three, >= 1024px → Two), y cada nivel dibuja solo su propia
+    agregación zoomLevel*Content:
       One   máximo detalle (zoom manual): + comentario
       Two   pantalla ancha: foto, nombre, cargo, decisión y fecha
-      Three columna estrecha: foto pequeña, nombre y decisión
+      Three columna estrecha (el caso habitual aquí): foto pequeña, nombre y decisión
       Four  móvil: solo la foto/iniciales
-    El zoom no es enlazable (solo existe setZoomLevel()), de modo que esta es la
-    forma soportada de controlar lo que se ve en cada tamaño.
 
-    ── IDs ─────────────────────────────────────────────────────────────────────
-    La app declara flexEnabled: true, que exige IDs estables en todo control de un
-    fragmento (adaptación de interfaz de usuario). Dentro de la plantilla del
-    binding de agregación UI5 les añade el sufijo del índice de fila al clonarlas
-    (historialProcessFlow-0, -1, …), así que siguen siendo únicos.
+    flexEnabled: true exige IDs estables en todo control de un fragmento; el
+    binding de agregación de UI5 les añade el sufijo del índice de fila al
+    clonarlas (historialProcessFlow-0, -1, …), así que siguen siendo únicos.
 -->
 <core:FragmentDefinition
     xmlns="sap.m"
@@ -47,12 +32,9 @@
     <VBox id="historialContenedor" class="sapUiSmallMarginBeginEnd sapUiSmallMarginBottom h2hFlujoDesplazable">
 
         <!--
-            Aviso de historial sin confirmar. `historialEsDemo` lo calcula CAP: es
-            true cuando ECP no devolvió ninguna firma para esta propuesta (iFlow
-            caído, o propuesta todavía sin firmar), y lo que se ve es solo el flujo
-            PREVISTO — sin firmantes ni fechas reales. En cuanto ECP confirma una
-            firma el flag pasa a false y el aviso desaparece solo, sin tocar esta
-            vista.
+            Aviso de historial sin confirmar. `historialEsDemo` lo calcula CAP:
+            true cuando ECP no devolvió ninguna firma (iFlow caído, o
+            propuesta sin firmar) y lo que se ve es solo el flujo previsto.
         -->
         <MessageStrip
             id="historialAvisoDemo"
@@ -63,23 +45,14 @@
             class="sapUiSmallMarginBottom" />
 
         <!--
-            ── Barra de zoom ───────────────────────────────────────────────────
+            Barra de zoom: el nivel del ProcessFlow no es una propiedad
+            enlazable de forma útil (el control lo recalcula desde su propio
+            ancho en cada resize), así que se usan sus métodos zoomIn()/
+            zoomOut() (ver ext/util/Historial.js). Al redimensionar el
+            control (abrir/cerrar columna del FCL) el zoom manual se descarta.
 
-            El nivel de zoom del ProcessFlow NO es una propiedad que se pueda
-            enlazar de forma útil: el control lo recalcula desde su PROPIO ancho
-            en cada redimensión (_initZoomLevel), así que cualquier valor
-            enlazado se pierde. La vía soportada son sus métodos zoomIn() y
-            zoomOut(), que es lo que hacen los handlers de ext/util/Historial.js.
-
-            Consecuencia que conviene conocer: al cambiar el tamaño del control
-            —abrir o cerrar una columna del FCL— el control vuelve a elegir el
-            nivel por ancho y descarta el zoom manual. Es comportamiento del
-            control, no un fallo de la app.
-
-            El core:require va aquí y no en el VBox contenedor: la plantilla de
-            los nodos se clona por fila y necesita el suyo propio (ver el
-            comentario del ProcessFlowNode), así que cada subárbol declara el que
-            usa en lugar de depender de un alias heredado.
+            core:require va aquí y no en el VBox contenedor porque la
+            plantilla de los nodos se clona por fila y necesita el suyo propio.
         -->
         <Toolbar
             id="historialBarraZoom"
@@ -102,14 +75,10 @@
         </Toolbar>
 
         <!--
-            La clase h2hFlujoCentrado centra el diagrama con `margin` automático
-            y NO con alineación flex del contenedor. La diferencia importa desde
-            que hay zoom: un hijo centrado con align-items queda recortado por la
-            izquierda cuando es más ancho que su caja, y esa parte ya no se puede
-            alcanzar con la barra de desplazamiento. Con margin automático el
-            diagrama se centra mientras cabe y, cuando no cabe, los márgenes se
-            quedan en cero y el scroll horizontal del contenedor llega a todo.
-            Ver webapp/css/estilos.css.
+            h2hFlujoCentrado centra el diagrama con margin automático, no con
+            alineación flex: con zoom, un hijo centrado por align-items queda
+            recortado por la izquierda cuando es más ancho que su caja y esa
+            parte deja de alcanzarse con scroll. Ver webapp/css/estilos.css.
         -->
         <pf:ProcessFlow
             id="historialProcessFlow"
@@ -122,22 +91,11 @@
             showLabels="false">
 
             <!--
-                ── Columnas: un lane por nivel de aprobación ──────────────────
-
-                El anillo semántico alrededor del ícono (verde = nivel resuelto,
-                azul = alguna firma en curso, rojo = rechazo, gris = aún no le
-                toca) NO se enlaza: lo calcula el propio control agregando el
-                `state` de los nodos de cada lane
-                (ProcessFlow.NodeElement._calculateLaneStatePieChart), y llama a
-                setState() sobre cada cabecera en CADA render. Cualquier `state`
-                que se enlace aquí se pierde en el primer repintado.
-
-                Como los `estadoNodo` de los nodos los decide CAP, el color del
-                nivel sigue siendo consecuencia directa de la lógica de negocio:
-                el control solo hace el recuento.
-
-                Lo que sí aporta CAP es el `resumen` del tooltip ("Apoderados ·
-                1 completado, 1 en curso"), que el control no ofrece.
+                El anillo semántico de la cabecera del lane no se enlaza: lo
+                calcula el propio control agregando el `state` de sus nodos y
+                lo reescribe en cada render. El color sigue saliendo de la
+                lógica de negocio porque `estadoNodo` lo decide CAP. `resumen`
+                (el tooltip, "Apoderados · 1 completado, 1 en curso") sí lo aporta CAP.
             -->
             <pf:lanes>
                 <pf:ProcessFlowLaneHeader
@@ -149,31 +107,22 @@
                     tooltip="{resumen}" />
             </pf:lanes>
 
-            <!-- ── Nodos: una tarjeta por firmante ───────────────────────── -->
+            <!-- Nodos: una tarjeta por firmante -->
             <pf:nodes>
                 <!--
-                    core:require va en ESTE nodo y no en <core:FragmentDefinition>:
-                    la directiva solo surte efecto sobre nodos de control y su
-                    subárbol, y FragmentDefinition no lo es. Declararla arriba deja
-                    los formatters sin resolver ("formatter function ... not found").
-                    Además, esta es la plantilla que se clona por fila, de modo que
-                    el alias queda garantizado dentro del binding de agregación.
+                    core:require va en este nodo (no en FragmentDefinition,
+                    que no propaga la directiva a su subárbol).
 
-                    En `children`, targetType:'any' es imprescindible: sin él UI5
-                    intenta convertir el valor del modelo al tipo de la propiedad de
-                    destino (any[]) ANTES de aplicar el formatter y falla con
-                    "Don't know how to format String to any[]". El efecto es
-                    children=undefined en todos los nodos y el diagrama se dibuja
-                    sin ninguna flecha de conexión. Lo mismo aplica a los `visible`
-                    de más abajo, que evalúan una fecha/comentario como boolean.
+                    En `children`, targetType:'any' evita que UI5 intente
+                    convertir el valor al tipo de la propiedad de destino
+                    (any[]) antes del formatter, lo que rompía el diagrama sin
+                    ninguna flecha de conexión. Mismo motivo en los `visible`
+                    de más abajo, que evalúan fecha/comentario como boolean.
 
-                    NO se enlaza `highlighted`. Es tentador para marcar el paso en
-                    curso, pero basta con que UN nodo lo tenga para que ProcessFlow
-                    entre en "modo resaltado" y calcule el anillo de TODOS los
-                    niveles contando únicamente los nodos resaltados: los demás
-                    niveles quedan en cero y sus anillos se pintan en gris, sin
-                    reflejar su estado real. El paso en curso ya se distingue por
-                    `focused`, por su color azul de estado y por su texto "En curso".
+                    No se enlaza `highlighted`: basta un nodo resaltado para
+                    que ProcessFlow recalcule el anillo de todos los niveles
+                    contando solo los resaltados. El paso en curso ya se
+                    distingue por `focused` y su texto "En curso".
                 -->
                 <pf:ProcessFlowNode
                     id="historialNodo"
@@ -204,13 +153,7 @@
                             <Text id="histZ1Cargo" text="{cargo}" textAlign="Center" maxLines="2" />
                             <ObjectStatus id="histZ1Estado" text="{decisionTexto}"
                                 state="{decisionValueState}" class="sapUiTinyMarginTop" />
-                            <!--
-                                targetType:'any' es obligatorio: en un binding de
-                                expresión UI5 convierte cada propiedad referenciada
-                                al tipo de la propiedad de destino ANTES de evaluar,
-                                y convertir la fecha a boolean lanza FormatException
-                                ("... is not a valid boolean value").
-                            -->
+                            <!-- targetType:'any': en un binding de expresión, convertir la fecha a boolean lanzaría FormatException. -->
                             <Text id="histZ1Fecha" text="{fechaTexto}" textAlign="Center"
                                 visible="{= !!${path:'fechaTexto', targetType:'any'} }" />
                             <Text id="histZ1Comentario" text="{comentario}" textAlign="Center" maxLines="3"

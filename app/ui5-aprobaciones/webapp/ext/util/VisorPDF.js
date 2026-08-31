@@ -1,29 +1,14 @@
 /**
- * app/ui5-aprobaciones/webapp/ext/util/VisorPDF.js
- *
  * Handler del botón "Ver PDF" de la cabecera del Object Page.
- * Se registra en manifest.json bajo
- *   sap.ui5 > routing > targets > TareasInboxObjectPage > options > settings >
- *   content > header > actions > verPDF > press
- * como "<módulo>.<método>": Fiori Elements carga este módulo y llama a abrir().
- * El botón sale en la toolbar del header title, junto a Pantalla completa y
- * Cerrar. Si la columna media del FCL queda muy angosta, la OverflowToolbar lo
- * repliega al menú "..." — es el comportamiento estándar del control, no hay
- * ajuste de manifest que lo fije fuera del desbordamiento.
+ * Registrado en manifest.json (routing > targets > TareasInboxObjectPage >
+ * options > settings > content > header > actions > verPDF > press).
  *
- * ── Por qué un diálogo y no una sección embebida ────────────────────────────
- * El Object Page vive en la columna media del FCL (~700 px). Un PDF a ese ancho
- * se lee mal y empujaría al ProcessFlow del historial fuera de vista. El popup
- * de sap.m.PDFViewer ocupa casi toda la ventana, y al cerrarlo el usuario
- * conserva el scroll y los botones de decisión del footer.
- * Además el documento se pide SOLO cuando alguien lo abre: embebido, cada tarea
- * abierta dispararía una llamada a SAP Gateway aunque nadie mire el PDF.
- *
- * ── Cómo llega el binario ───────────────────────────────────────────────────
- * PDFViewer monta un <iframe> sobre la URL de TareasInbox.urlPDF, que apunta a
- * la entidad media PropuestaPDF (ver srv/pagos-service.cds). Al ser mismo origen
- * a través del approuter, la petición viaja con la sesión ya autenticada: no
- * hace falta token ni construir un blob en el cliente.
+ * Se muestra en un diálogo (sap.m.PDFViewer) y no embebido: el Object Page
+ * vive en la columna media del FCL (~700 px), donde un PDF se leería mal, y
+ * el documento se pide solo cuando alguien lo abre. PDFViewer monta un
+ * <iframe> sobre TareasInbox.urlPDF (entidad media PropuestaPDF, ver
+ * srv/pagos-service.cds); al ser mismo origen vía el approuter, la petición
+ * ya viaja autenticada.
  */
 sap.ui.define([
     "sap/m/PDFViewer",
@@ -32,20 +17,14 @@ sap.ui.define([
     "use strict";
 
     /**
-     * Instancia única y reutilizada.
-     *
-     * PDFViewer no expone evento de cierre —solo error, loaded y
-     * sourceValidationFailed—, así que crear uno por pulsación dejaría controles
-     * huérfanos: no hay momento fiable para destruirlos. Un solo visor al que se
-     * le cambia el source en cada apertura evita la fuga sin código de limpieza.
+     * Instancia única y reutilizada: PDFViewer no expone evento de cierre, así
+     * que crear uno por pulsación dejaría controles huérfanos.
      */
     var oVisor = null;
 
     /**
      * Resuelve el contexto de la tarea sea cual sea la firma con la que sap.fe
-     * invoque el handler: las versiones recientes pasan el evento de pulsación,
-     * las anteriores el binding context directamente, y en ambos casos `this`
-     * puede ser la ExtensionAPI de la página.
+     * invoque el handler (evento de pulsación o binding context directo).
      */
     function _resolverContexto(oParametro, oThis) {
         if (oParametro) {
@@ -71,9 +50,6 @@ sap.ui.define([
         if (!oVisor) {
             oVisor = new PDFViewer({
                 showDownloadButton: true,
-                // El navegador ya avisa a su manera cuando no puede pintar el
-                // documento; estos textos son los que ve el usuario dentro del
-                // diálogo si la petición falla.
                 errorMessage           : "No se pudo abrir el documento de la propuesta.",
                 errorPlaceholderMessage: "Verifique que la propuesta tenga documento generado en SAP.",
                 error: function () {
@@ -81,10 +57,8 @@ sap.ui.define([
                 }
             });
 
-            // sourceValidationFailed salta cuando el Content-Type de la
-            // respuesta no es application/pdf. El backend lo envía correcto
-            // (ver handle_pdf), así que no se pide confirmación al usuario:
-            // preventDefault evita el diálogo intermedio de UI5.
+            // El backend siempre envía application/pdf (ver handle_pdf), así
+            // que se evita el diálogo intermedio de confirmación de UI5.
             oVisor.attachSourceValidationFailed(function (oEvento) {
                 oEvento.preventDefault();
             });
@@ -108,23 +82,14 @@ sap.ui.define([
 
             var sTitulo = oContexto.getProperty("tituloTarea") || "Documento de la propuesta";
 
-            // requestProperty y NO getProperty.
-            //
-            // getProperty solo lee lo que ya está en el contexto, y urlPDF no
-            // está: Fiori Elements no mete en el $select del Object Page los
-            // DataField con ![@UI.Hidden] estático —el mismo comportamiento que
-            // ya documenta AccionesHandler para esApoderado—, así que el campo
-            // viaja en la entidad pero nunca se pide. El síntoma era un
-            // "no tiene documento disponible" en propuestas que sí lo tienen.
-            //
-            // requestProperty pide la propiedad al servidor cuando falta y
-            // devuelve una promesa con el valor.
+            // requestProperty y no getProperty: urlPDF tiene ![@UI.Hidden]
+            // estático y Fiori Elements no lo mete en el $select del Object
+            // Page, así que hay que pedirlo al servidor cuando falta.
             oContexto.requestProperty("urlPDF")
                 .then(function (sUrl) {
                     if (!sUrl) {
-                        // Sin URL de verdad no hay nada que abrir: urlPDF llega
-                        // vacío cuando la propuesta no trae la terna completa
-                        // (número, sociedad y fecha). Ver _urlPDF en
+                        // urlPDF llega vacío si la propuesta no trae la terna
+                        // completa (número, sociedad, fecha) — ver _urlPDF en
                         // srv/pagos-service.js.
                         MessageBox.information("Esta propuesta no tiene documento disponible.");
                         return;

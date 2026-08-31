@@ -1,30 +1,20 @@
 /**
- * app/ui5-aprobaciones/webapp/ext/util/Historial.js
- *
  * Formatters y handlers del ProcessFlow "Historial de Aprobaciones".
- *
- * Deliberadamente MÍNIMO: toda la lógica de negocio (estados, topología del
- * grafo, fechas, iniciales) se resuelve en CAP — srv/domain/historial.service.js.
- * Lo que queda aquí son dos adaptaciones de tipo que OData V4 no permite hacer
- * del lado del servidor, y el zoom del diagrama, que es estado de presentación
- * puro y vive en el control.
+ * La lógica de negocio (estados, topología del grafo, fechas, iniciales) se
+ * resuelve en CAP (srv/domain/historial.service.js); aquí solo quedan
+ * adaptaciones de tipo que OData V4 no permite del lado del servidor, y el
+ * zoom del diagrama (estado de presentación puro).
  *
  * Se consume desde el fragmento vía core:require, no como formatter del
- * controller: así el fragmento no depende de la extensión de controller.
+ * controller, para que el fragmento no dependa de la extensión de controller.
  */
 sap.ui.define([], function () {
     "use strict";
 
     /**
-     * El ProcessFlow al que pertenece el botón pulsado.
-     *
-     * Se busca subiendo por los padres y bajando por el subárbol de cada uno, en
-     * vez de resolverlo por ID. El motivo es que el fragmento se instancia dentro
-     * de una sección personalizada de Fiori Elements, que antepone su propio
-     * prefijo al ID declarado ("…::TareasInboxObjectPage--fe::CustomSubSection…
-     * historialProcessFlow"). Ese prefijo no es estable ni está documentado, así
-     * que buscarlo por relación de árbol es lo único que no se rompe si FE
-     * cambia cómo compone los IDs.
+     * El ProcessFlow al que pertenece el botón pulsado. Se busca subiendo por
+     * los padres y bajando por el subárbol de cada uno, en vez de por ID: el
+     * prefijo que Fiori Elements antepone al ID declarado no es estable.
      *
      * @param {sap.ui.core.Control} oOrigen - control que disparó el evento
      * @returns {sap.suite.ui.commons.ProcessFlow|null}
@@ -63,12 +53,8 @@ sap.ui.define([], function () {
     }
 
     /**
-     * Apaga el botón que ya no puede hacer nada.
-     *
-     * Los niveles del control van de "One" (máximo detalle) a "Four" (mínimo), y
-     * zoomIn/zoomOut devuelven el nivel resultante. En los extremos las llamadas
-     * no hacen nada, así que esto no evita ningún error: evita que el usuario
-     * pulse un botón que no responde y crea que la pantalla se ha colgado.
+     * Apaga el botón de zoom que ya no puede hacer nada. Los niveles van de
+     * "One" (máximo detalle) a "Four" (mínimo).
      *
      * @param {sap.ui.core.Control} oBarra - la Toolbar que contiene los botones
      * @param {string} sNivel - nivel de zoom resultante
@@ -95,9 +81,6 @@ sap.ui.define([], function () {
         var oBoton = oEvent.getSource();
         var oDiagrama = _diagrama(oBoton);
 
-        // Sin diagrama no hay nada que hacer y tampoco nada que romper: la barra
-        // podría haberse renderizado sin el ProcessFlow si el modelo aún no ha
-        // llegado. Se sale en silencio en vez de lanzar sobre un clic del usuario.
         if (!oDiagrama || typeof oDiagrama[sMetodo] !== "function") {
             return;
         }
@@ -107,12 +90,9 @@ sap.ui.define([], function () {
 
     return {
         /**
-         * CSV de nodeIds → array, para ProcessFlowNode.children.
-         *
-         * CAP envía las aristas del grafo como "N2-1,N2-2" en vez de una
-         * Collection(Edm.String) porque ODataPropertyBinding de OData V4 solo
-         * admite valores primitivos: enlazar una propiedad de colección a una
-         * propiedad de control lanza "Accessed value is not primitive".
+         * CSV de nodeIds → array, para ProcessFlowNode.children. CAP envía las
+         * aristas como "N2-1,N2-2" porque ODataPropertyBinding de OData V4
+         * solo admite valores primitivos.
          *
          * @param {string} sHijos - nodeIds separados por coma
          * @returns {string[]} siempre un array (vacío si es el último nivel)
@@ -125,16 +105,9 @@ sap.ui.define([], function () {
         },
 
         /**
-         * URL de foto → src del Avatar.
-         *
-         * Devuelve undefined cuando no hay foto (hoy: siempre — el iFlow de ECP no
-         * devuelve FotoUrl). Con src vacío el Avatar intentaría cargar una imagen
-         * inexistente; con undefined cae limpiamente a las iniciales que calcula CAP.
-         *
-         * En los nodos que aún no tienen persona —un apoderado del pool antes de
-         * firmar— CAP manda también las iniciales vacías a propósito, y el Avatar
-         * cae un escalón más, al fallbackIcon: la tarjeta muestra el ícono
-         * genérico en vez de atribuir el paso a nadie.
+         * URL de foto → src del Avatar. Devuelve undefined cuando no hay foto,
+         * para que caiga a las iniciales (o al fallbackIcon si tampoco hay
+         * iniciales) en vez de intentar cargar una imagen inexistente.
          *
          * @param {string} sUrl
          * @returns {string|undefined}
@@ -144,19 +117,10 @@ sap.ui.define([], function () {
         },
 
         /**
-         * Acerca un nivel el diagrama (más detalle en cada tarjeta).
-         *
-         * POR QUÉ UN HANDLER Y NO UNA PROPIEDAD ENLAZADA
-         * ----------------------------------------------
-         * El zoom del ProcessFlow no es estado de negocio ni se puede enlazar de
-         * forma útil: el control lo recalcula desde su PROPIO ancho cada vez que
-         * cambia de tamaño (_initZoomLevel), de modo que un valor enlazado se
-         * pierde en el primer recálculo. Los métodos zoomIn()/zoomOut() son la
-         * única vía soportada, y devuelven el nivel resultante.
-         *
-         * Efecto secundario que conviene conocer: al redimensionar el control
-         * —abrir o cerrar una columna del FCL— el nivel vuelve a decidirse por
-         * ancho y el zoom manual se descarta. Es del control, no de la app.
+         * Acerca un nivel el diagrama (más detalle en cada tarjeta). Un
+         * handler y no una propiedad enlazada: el control recalcula el zoom
+         * desde su propio ancho en cada resize (_initZoomLevel), así que solo
+         * zoomIn()/zoomOut() son la vía soportada.
          *
          * @param {sap.ui.base.Event} oEvent - press del botón
          */
@@ -166,8 +130,6 @@ sap.ui.define([], function () {
 
         /**
          * Aleja un nivel el diagrama (caben más tarjetas, con menos detalle).
-         * Ver `acercar` para el porqué de hacerlo con un handler.
-         *
          * @param {sap.ui.base.Event} oEvent - press del botón
          */
         alejar: function (oEvent) {

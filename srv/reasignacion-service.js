@@ -1,7 +1,5 @@
 "use strict";
 /**
- * srv/reasignacion-service.js
- *
  * Implementación del ReasignacionService usando el patrón cds.ApplicationService.
  *
  * Grupos de handlers registrados automáticamente por init():
@@ -13,7 +11,7 @@
  *   handle_reasignar()  → acción bound reasignar sobre Firmante (delegada a
  *                          domain/reasignacion.service.js)
  *
- * LA UNIDAD DE TRABAJO ES LA PROPUESTA, no la tarea: el administrador abre una
+ * La unidad de trabajo es la propuesta, no la tarea: el administrador abre una
  * propuesta y desde ahí ve su flujo completo y reasigna el rol que corresponda.
  * TareasEnCurso sigue siendo la verdad de BPA a nivel tarea y es de donde se
  * derivan las propuestas, pero ya no es la raíz de la UI.
@@ -29,15 +27,11 @@ const odata     = require("./infrastructure/odata-memoria");
 const histSvc   = require("./domain/historial.service");
 const perfiles  = require("./config/perfiles");
 const { CRITICIDAD, ESTADOS } = require("./config/estados");
+const { grupoPersonal } = require("./config/grupos-personal");
 
 const LOG = cds.log("ReasignacionService");
 
-/**
- * Vida del snapshot de tareas en curso (ver _tareasEnCurso).
- * 30 s es el compromiso entre no repetir la tormenta de llamadas a BPA y que el
- * admin vea reflejado en menos de medio minuto lo que cambie por fuera de esta
- * app (una tarea completada, una reasignación hecha por otro administrador).
- */
+/** Vida del snapshot de tareas en curso (ver _tareasEnCurso). */
 const CACHE_TTL_MS = 30_000;
 
 /** Traducción de negocio de los status crudos que devuelve BPA. */
@@ -47,23 +41,10 @@ const DESCRIPCION_ESTADO = {
 };
 
 /**
- * Color semántico de la columna "Estado", por nivel de aprobación.
- *
- * Mismo criterio que la app de aprobaciones (ver config/estados.js): el color
- * separa los estados que CONVIVEN en la lista, que es donde hace trabajo.
- * Aquí conviven tareas de los tres roles a la vez, así que el color distingue
- * en qué punto del flujo está cada una:
- *
- *   azul  → en firma de apoderados, curso normal
- *   ámbar → en el liberador, último paso antes del desembolso
- *
- * No se colorea por status BPA (READY vs. RESERVED): esa distinción es técnica
- * —si el destinatario ya abrió la tarea o no— y no cambia lo que el admin
- * decide, que es a quién reasignarla.
- *
- * Se indexa por la CLAVE del rol y no por su label, y el mapa label→color se
- * deriva de ROLES_BPA: así renombrar un label en config/perfiles.js no deja
- * estados sin color en silencio.
+ * Color semántico de la columna "Estado", por nivel de aprobación (no por
+ * status BPA READY/RESERVED, que es una distinción técnica sin efecto en la
+ * decisión del admin). Indexado por la clave del rol; el mapa label→color se
+ * deriva de ROLES_BPA.
  */
 const CRITICIDAD_POR_ROL = {
   apoderado  : CRITICIDAD.INFORMATION,
@@ -80,37 +61,17 @@ const CRITICIDAD_POR_LABEL = Object.fromEntries(
 /**
  * Los roles del flujo, en el orden en que firman.
  *
- * `nivel` es la coordenada del diagrama de ESTA app: analista 1, apoderados 2,
- * liberador 3. Es una numeración propia y basta con que sea correlativa — los
- * lanes se rotulan por `codigoLane` (AN/AP/LI) y no por el número, y las aristas
- * las deriva histSvc._enlazarNodos de los niveles distintos que encuentre.
+ * `nivel` es la coordenada del diagrama de esta app (analista 1, apoderados 2,
+ * liberador 3); no coincide con NIVEL_POR_ROL de historial.service.js, que
+ * intercala el paso del coordinador.
  *
- * NO coincide con NIVEL_POR_ROL de domain/historial.service.js: el historial de
- * aprobaciones intercala el paso del coordinador (analista 1, coordinador 2,
- * apoderados 3, liberador 4), que aquí no se dibuja porque no hay tarea que
- * reasignar en él.
- *
- * DESDE BPA v1.2.0 SON DOS ENTRADAS, NO TRES. Los apoderados dejaron de ser dos
- * roles con un usuario cada uno para ser UN rol con una lista de N usuarios
- * equivalentes y quórum de dos firmas (ver config/perfiles.js).
- *
- * LOS DOS SON POOLES. El liberador también: Payroll puede dejar varios correos
- * separados por comas en usuarioLiberador y BPA los reparte como destinatarios
- * de una sola tarea. Cada miembro de cualquiera de las dos listas produce su
- * propia fila de firmante, con su estado y su botón.
- *
- * `campoPool` y `campoFirmados` dicen DE QUÉ CAMPO de la fila de la tarea sale
- * la lista de cada rol, que es lo único que los diferencia aquí: BPA lleva la
- * cuenta del pool de apoderados (poolPendientes / poolFirmantes, recalculados en
- * cada firma) y no lleva ninguna del liberador (poolLiberadores, la lista de la
- * propuesta). `campoFirmados` en null no es un hueco: significa "de este rol no
- * hay firmas registradas", y de ahí cuelgan el estado sin tarea y los contadores
- * (ver _construirFirmantes y _sinTarea).
- *
- * `label` y `campoPropuesta` NO se repiten aquí: salen de config/perfiles.js,
- * que es la fuente de verdad. `campoPropuesta` es justo lo que hace posible
- * mostrar un firmante SIN tarea viva — es el campo del contexto BPA donde
- * Payroll dejó su correo (o su lista) al arrancar el flujo.
+ * Los dos roles son pools: los apoderados por el quórum de dos firmas, el
+ * liberador porque Payroll puede dejar varios correos en usuarioLiberador.
+ * `campoPool`/`campoFirmados` dicen de qué campo de la tarea sale la lista de
+ * cada rol — BPA lleva la cuenta del pool de apoderados (recalculado en cada
+ * firma) pero no la del liberador. `campoFirmados: null` significa "de este
+ * rol no hay firmas registradas" (ver _construirFirmantes y _sinTarea).
+ * `label` y `campoPropuesta` salen de config/perfiles.js.
  */
 const ROLES_FLUJO = [
   { clave: "apoderado", nivel: 2, campoPool: "poolPendientes", campoFirmados: "poolFirmantes" },
@@ -127,20 +88,10 @@ const ROLES_FLUJO = [
 });
 
 /**
- * Estados de un firmante SIN tarea viva sobre la que actuar.
- *
- * Para el liberador se deduce de la posición: si su nivel ya está alcanzado por
- * el flujo —es decir, no es posterior al nivel más bajo que todavía tiene
- * tarea— entonces le tocó y no tiene tarea, luego firmó. Si es posterior, aún no
- * le ha llegado el turno.
- *
- * Para los apoderados NO hace falta deducir nada desde v1.2.0: BPA lleva la
- * cuenta en context.custom.apoderadosfirmantes, así que se sabe con exactitud
- * quién firmó y quién sigue pendiente.
- *
- * El motivo se muestra en la columna "Observación" y en el tooltip del botón
- * inactivo — que el administrador entienda POR QUÉ no puede reasignar es la
- * mitad del trabajo de esta pantalla.
+ * Estados de un firmante sin tarea viva sobre la que actuar. Para el
+ * liberador se deduce de la posición en el flujo (ver _sinTarea); para los
+ * apoderados, BPA lleva la cuenta exacta de quién firmó. El motivo se
+ * muestra en la columna "Observación" y en el tooltip del botón inactivo.
  */
 const ESTADO_SIN_TAREA = {
   FIRMADO: {
@@ -200,8 +151,6 @@ class ReasignacionService extends cds.ApplicationService {
 
       if (propuestaID) {
         const propuesta = propuestas.find(p => p.propuestaID === propuestaID);
-        // La propuesta pudo completarse entre que se pintó la lista y el usuario
-        // abrió la fila: un 404 es más honesto que un Object Page vacío.
         if (!propuesta) return req.reject(404, `La propuesta ${propuestaID} ya no tiene tareas en curso`);
         return propuesta;
       }
@@ -242,10 +191,8 @@ class ReasignacionService extends cds.ApplicationService {
      */
     this.on("READ", "TareasEnCurso", async (req) => {
       const tareas = await _tareasEnCurso();
-      // La barra de filtros de esta app (sociedad, rol, usuario, estado) es su
-      // razón de ser: el admin la usa para ubicar las tareas de una persona.
-      // BPA no filtra por estos campos, así que el $filter/$search/$orderby se
-      // resuelven aquí. Ver infrastructure/odata-memoria.js.
+      // BPA no filtra por sociedad/rol/usuario/estado; se resuelve aquí (ver
+      // infrastructure/odata-memoria.js).
       return odata.aplicarConsulta(tareas, req);
     });
   }
@@ -254,14 +201,9 @@ class ReasignacionService extends cds.ApplicationService {
 
   /**
    * GET /nomina/reasignacion/{Sociedades|Usuarios|Roles|Estados}
-   *
-   * Alimentan las ayudas de búsqueda (F4) de los cuatro filtros. Los cuatro
-   * pasan por odata.aplicarConsulta porque el diálogo de value help envía sus
-   * propios $filter / $search / $top / $count al teclear.
-   *
-   * Sociedades y Usuarios se derivan del MISMO snapshot que la lista: el
-   * desplegable ofrece exactamente los valores que hoy devuelven filas, nunca
-   * un código de sociedad que ya no tiene tareas en curso.
+   * Alimentan las ayudas de búsqueda (F4) de los cuatro filtros. Sociedades y
+   * Usuarios se derivan del mismo snapshot que la lista; Roles es dominio
+   * cerrado (config/perfiles.js); Estados ofrece los de propuesta, no los de tarea.
    */
   static handle_ayudas() {
     this.on("READ", "Sociedades", async (req) => {
@@ -269,19 +211,13 @@ class ReasignacionService extends cds.ApplicationService {
       return odata.aplicarConsulta(valores.map(sociedad => ({ sociedad })), req);
     });
 
-    // Todos los destinatarios de tareas vivas, no solo el primero de cada una:
-    // la tarea de apoderado tiene un pool y ofrecer únicamente a su primer
-    // miembro dejaría fuera del desplegable a los demás, que son exactamente
-    // las personas a las que el admin necesita llegar.
+    // Todos los destinatarios de tareas vivas, no solo el primero de cada una
+    // (la tarea de apoderado tiene un pool).
     this.on("READ", "Usuarios", async (req) => {
       const valores = _destinatariosVivos(await _tareasEnCurso());
       return odata.aplicarConsulta(valores.map(usuarioActual => ({ usuarioActual })), req);
     });
 
-    // Roles es dominio cerrado: no depende de las tareas, así que no toca BPA.
-    // La fuente de verdad es config/perfiles.js — el mismo `label` que
-    // _mapearTarea() escribe en la columna Rol, para que el valor elegido en
-    // el filtro case exactamente con el de la fila.
     this.on("READ", "Roles", (req) => {
       const roles = Object.values(perfiles.ROLES_BPA)
         .filter(rol => rol.activo)
@@ -289,9 +225,6 @@ class ReasignacionService extends cds.ApplicationService {
       return odata.aplicarConsulta(roles, req);
     });
 
-    // Estados ofrece los estados de PROPUESTA, que es lo que se filtra en la
-    // lista — no los de tarea (estadoNivel), que son un cruce status × rol.
-    // Solo se ofrecen los que hoy tienen alguna propuesta detrás.
     this.on("READ", "Estados", async (req) => {
       const valores = _distintos(await _propuestasEnCurso(), "estadoPropuesta");
       return odata.aplicarConsulta(valores.map(estadoPropuesta => ({ estadoPropuesta })), req);
@@ -303,18 +236,13 @@ class ReasignacionService extends cds.ApplicationService {
   static handle_reasignar() {
     /**
      * Registra el handler de la acción bound reasignar(nuevoUsuario).
-     * La lógica vive en domain/reasignacion.service.js para separación de
-     * capas, igual que aprobacion.service.js en PagosService.
-     *
-     * Se le inyecta el resolutor del firmante porque la agrupación de tareas en
-     * propuestas es responsabilidad de este módulo, no de la capa de dominio.
+     * La lógica vive en domain/reasignacion.service.js; se inyecta el
+     * resolutor del firmante porque la agrupación de tareas en propuestas es
+     * responsabilidad de este módulo.
      */
     reasigSvc.registrarHandlers(this, { buscarFirmante: _buscarFirmante });
 
-    // Una reasignación cambia el destinatario de un firmante: invalidar el
-    // snapshot hace que el refresco que Fiori Elements dispara justo después
-    // traiga ya el usuario nuevo, en vez de repetir el anterior hasta que
-    // venza el TTL.
+    // Invalida el snapshot para que el refresco posterior traiga ya el usuario nuevo.
     this.after("reasignar", "Firmante", () => {
       _invalidarSnapshot();
     });
@@ -327,20 +255,9 @@ class ReasignacionService extends cds.ApplicationService {
 
 /**
  * Devuelve las tareas en curso, reusando el último resultado durante
- * CACHE_TTL_MS.
- *
- * POR QUÉ HAY CACHÉ AQUÍ Y NO EN TareasInbox
- * ------------------------------------------
- * Armar esta lista cuesta un readContext de BPA POR TAREA (en el entorno actual,
- * del orden de 150 peticiones HTTP). Sin caché eso se repetía en cada pulsación
- * de "Ir", en cada scroll de la tabla y —desde que existen los value helps— cada
- * vez que se abre un desplegable de la barra de filtros, porque el filtrado vive
- * en memoria y obliga a traer la lista entera antes de recortarla.
- *
- * Es seguro compartir el snapshot entre peticiones porque, a diferencia del
- * inbox de PagosService, TareasEnCurso NO depende del usuario autenticado: es la
- * misma lista de tareas de todos los usuarios para cualquier administrador. No
- * hay dato de un usuario que pueda filtrarse al de otro.
+ * CACHE_TTL_MS. Armar la lista cuesta un readContext de BPA por tarea; el
+ * snapshot es seguro de compartir entre peticiones porque TareasEnCurso no
+ * depende del usuario autenticado (misma lista para cualquier administrador).
  */
 async function _tareasEnCurso() {
   if (Date.now() < _snapshot.expira) return _snapshot.tareas;
@@ -356,13 +273,9 @@ function _invalidarSnapshot() {
 }
 
 /**
- * Lee una clave de la petición, venga como parámetro de ruta o dentro del where
- * que CAP arma para una composición.
- *
- * Las dos formas ocurren de verdad: el Object Page llega como
- * PropuestasEnCurso('id') —parámetro— mientras que
- * PropuestasEnCurso('id')/firmantes llega con la clave del padre en el `where`
- * del `from`. Mismo criterio que _extraerInstanceID en pagos-service.js.
+ * Lee una clave de la petición, venga como parámetro de ruta o dentro del
+ * where que CAP arma para una composición (mismo criterio que
+ * _extraerInstanceID en pagos-service.js).
  */
 function _clavePeticion(req, campo) {
   const parametros = req.params ?? [];
@@ -377,29 +290,13 @@ function _clavePeticion(req, campo) {
 }
 
 /**
- * Recorta una composición a la fila concreta cuando la petición trae su clave.
- *
- * POR QUÉ NO BASTA odata.aplicarConsulta
- * --------------------------------------
- * Al pedir UNA fila —PropuestasEnCurso('P')/firmantes(propuestaID='P',
- * firmanteID='liberador')— CAP deja la clave en el `where` del SEGMENTO DE
- * NAVEGACIÓN (query.SELECT.from.ref[1].where), no en query.SELECT.where, que es
- * lo único que aplicarConsulta mira. Sin este recorte el handler devolvía la
- * colección entera y CAP se quedaba con la PRIMERA fila: pedir el liberador
- * contestaba con el primer apoderado, con sus datos y su estado.
- *
- * Nadie lo notaba mientras la UI solo leyera colecciones. Lo destapa el refresco
- * por Common.SideEffects de la acción reasignar, que relee exactamente la fila
- * reasignada: sin esto, refrescar habría PISADO la fila con datos de otra
- * persona — peor que no refrescar.
- *
- * Se filtra por los pares clave/valor que CAP ya dejó resueltos en el último
- * elemento de req.params, en vez de volver a interpretar el CQN: es el mismo
- * dato, ya normalizado, y sirve igual para Firmante (firmanteID), NivelFlujo
- * (laneId) y NodoFlujo (nodeId) sin que este helper conozca ninguna de las tres.
- *
- * En una lectura de colección ese elemento trae solo la clave del padre, que
- * todas las filas cumplen: el filtro es entonces inocuo.
+ * Recorta una composición a la fila concreta cuando la petición trae su
+ * clave. Al pedir una fila, CAP deja la clave en el `where` del segmento de
+ * navegación (from.ref[1].where), no en query.SELECT.where que es lo único
+ * que mira odata.aplicarConsulta; sin este recorte se devolvía la colección
+ * entera y CAP se quedaba con la primera fila. Filtra por los pares
+ * clave/valor del último elemento de req.params, válido para Firmante
+ * (firmanteID), NivelFlujo (laneId) y NodoFlujo (nodeId) sin conocer ninguna.
  */
 function _filtrarPorClave(filas, req) {
   const claves = req.params?.[req.params.length - 1];
@@ -428,15 +325,9 @@ function _distintos(filas, campo) {
 
 /**
  * Formatea el importe con el símbolo de su moneda según la convención peruana:
- * "S/ 43,038.69" para PEN, "US$ 1,500.00" para USD.
- *
- * `importe` llega como texto desde el contexto BPA (nunca como número). Si no es
- * convertible se devuelve el valor original: es preferible mostrar el dato crudo
- * antes que un "S/ NaN".
- *
- * Duplicado a propósito de _formatearImporte en pagos-service.js, por la misma
- * razón que _extraerPropuesta más abajo: cada servicio mantiene sus helpers
- * privados de mapeo en vez de acoplarse al otro.
+ * "S/ 43,038.69" para PEN, "US$ 1,500.00" para USD. Duplicado de
+ * _formatearImporte en pagos-service.js: cada servicio mantiene sus propios
+ * helpers de mapeo.
  */
 function _formatearImporte(importe, moneda) {
   if (importe === null || importe === undefined || String(importe).trim() === "") return "";
@@ -479,13 +370,33 @@ function _conImporteFormateado(tarea) {
 }
 
 /**
- * Combina el status de BPA con el nivel de aprobación en una sola frase de
- * negocio — "Pendiente - Apoderado 1", "Reservada - Liberador Final" — en vez
- * del literal técnico "READY" / "RESERVED" a secas, que no dice en qué punto
- * del flujo está la tarea.
+ * Pasa una fecha ISO del contexto BPA a dd/MM/yyyy.
  *
- * Si el status no está en DESCRIPCION_ESTADO se devuelve tal cual: preferible
- * mostrar el código crudo de BPA a ocultar la fila por un valor no mapeado.
+ * Se formatea en el servidor y no en la app porque estas fechas viajan como
+ * String —son parte de la clave de negocio de la propuesta— y una propiedad
+ * String no la formatea el cliente: llegaría "2026-08-07" a la pantalla,
+ * mientras el aprobador ve "07/08/2026" para la misma propuesta en PagosService.
+ *
+ * Lo que no case con el patrón ISO se devuelve vacío en vez de a medias: un
+ * formato inesperado de BPA se ve como un hueco, no como una fecha inventada.
+ */
+function _fechaDdMmAaaa(iso) {
+  const partes = String(iso ?? "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return partes ? `${partes[3]}/${partes[2]}/${partes[1]}` : "";
+}
+
+/** Añade las fechas ya formateadas a una tarea del List Report. */
+function _conFechasFormateadas(tarea) {
+  return {
+    ...tarea,
+    fechaPPTexto  : _fechaDdMmAaaa(tarea.fechaPropuestaPago),
+    fechaPagoTexto: _fechaDdMmAaaa(tarea.fechaPago),
+  };
+}
+
+/**
+ * Combina el status de BPA con el nivel de aprobación en una frase de
+ * negocio: "Pendiente - Apoderado 1", "Reservada - Liberador Final".
  */
 function _formatearEstadoNivel(estadoTarea, rolTarea) {
   const descripcion = DESCRIPCION_ESTADO[estadoTarea] ?? estadoTarea ?? "";
@@ -493,39 +404,21 @@ function _formatearEstadoNivel(estadoTarea, rolTarea) {
 }
 
 /**
- * Clave de negocio de la propuesta, usada para AGRUPAR la lista.
- *
- * Deliberadamente NO se agrupa por workflowInstanceId: los apoderados corren en
- * el subproceso de Apoderados y el liberador en el proceso raíz (ver contextPath
- * en config/perfiles.js), así que sus instancias de workflow no tienen por qué
- * coincidir. La propuesta sí es la misma de punta a punta.
- *
- * Los tres campos hacen falta: numeroPropuesta se repite entre sociedades, y la
- * misma sociedad puede reemitir un número en otra fecha de pago — es la misma
- * terna que identifica la propuesta en el PDF (ver PropuestaPDF en
- * pagos-service.js).
- *
- * El texto es a la vez la etiqueta de la cabecera del grupo, así que se compone
- * para leerse: "0031 · 3127 · 2026-08-07".
+ * Clave de negocio de la propuesta, usada para agrupar la lista (no por
+ * workflowInstanceId: apoderados y liberador corren en procesos distintos).
+ * Texto legible para la cabecera del grupo: "0031 · 3127 · 2026-08-07".
  */
 function _clavePropuesta(tarea) {
   const partes = [tarea.sociedad, tarea.numeroPropuesta, tarea.fechaPropuestaPago]
     .map(parte => String(parte ?? "").trim())
     .filter(parte => parte !== "");
 
-  // Sin ninguna de las tres no hay propuesta que agrupar: cada tarea va a su
-  // propio grupo en vez de caer todas juntas en un cajón vacío.
   return partes.length ? partes.join(" · ") : `(sin propuesta) ${tarea.instanceID}`;
 }
 
 /**
- * La misma clave, en formato seguro para una URL: '0031~3127~2026-08-07'.
- *
- * Es el key de PropuestasEnCurso, así que viaja en la ruta del Object Page. El
- * separador ' · ' de grupoPropuesta no sirve ahí: obligaría a escapar espacios y
- * un carácter no ASCII en cada navegación. '~' no aparece en ninguno de los tres
- * campos (código numérico, número de propuesta y fecha), así que la partición es
- * reversible y no hay nada que escapar.
+ * La misma clave, en formato seguro para URL: '0031~3127~2026-08-07' (key de
+ * PropuestasEnCurso). '~' no aparece en ninguno de los tres campos.
  */
 function _idPropuesta(tarea) {
   const partes = [tarea.sociedad, tarea.numeroPropuesta, tarea.fechaPropuestaPago]
@@ -546,10 +439,8 @@ function _conClavePropuesta(tarea) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PROPUESTAS — la unidad de trabajo del administrador
-//
-// Todo lo de aquí abajo se deriva del MISMO snapshot de tareas: agrupar no cuesta
-// ni una llamada más a BPA, porque el contexto de cada tarea ya se leyó al
-// construirla (ver _mapearTarea).
+// Se deriva del mismo snapshot de tareas (ver _mapearTarea); agrupar no
+// cuesta una llamada más a BPA.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
@@ -605,8 +496,12 @@ function _construirPropuesta(propuestaID, tareas) {
     numeroPropuesta   : referencia.numeroPropuesta,
     fechaPropuestaPago: referencia.fechaPropuestaPago,
     fechaPago         : referencia.fechaPago,
+    fechaPPTexto      : referencia.fechaPPTexto,
+    fechaPagoTexto    : referencia.fechaPagoTexto,
     tituloTarea       : referencia.tituloTarea,
     banco             : referencia.banco,
+    bancoDescripcion  : referencia.bancoDescripcion,
+    grupoPersonal     : referencia.grupoPersonal,
     importe           : referencia.importe,
     moneda            : referencia.moneda,
     importeTexto      : referencia.importeTexto,
@@ -696,98 +591,51 @@ async function _buscarFirmante(propuestaID, firmanteID) {
 }
 
 /**
- * Las filas de firmante que produce un rol del flujo.
+ * Las filas de firmante que produce un rol del flujo. Devuelve un array
+ * porque los dos roles activos son pools: cada miembro de la lista es una
+ * persona distinta, con su propio estado y su propio botón.
  *
- * Devuelve un array porque los DOS roles activos son POOLES: cada miembro de la
- * lista es una persona distinta, con su propio estado y su propio botón. Los
- * apoderados lo son por el quórum de v1.2.0; el liberador, desde que Payroll
- * puede dejar varios correos separados por comas en usuarioLiberador. Un rol con
- * un único destinatario no es un caso aparte sino un pool de uno, y por eso ya
- * no hay una segunda función para él: la que había producía filas con clave y
- * estados distintos, y esa divergencia era justo la que dejaba al segundo
- * liberador sin fila que reasignar.
- *
- * DE DÓNDE SALE LA LISTA DE CADA ROL
- * ----------------------------------
- * De los campos que ROLES_FLUJO nombra —`campoPool` y `campoFirmados`—, que
- * apuntan a lo que _mapearTarea dejó en la fila de la tarea. Son distintos
- * porque BPA solo lleva la cuenta de uno de los dos pools:
- *
- *   apoderados → poolPendientes / poolFirmantes, que el BPMN recalcula en cada
- *                firma (context.custom.*).
- *   liberador  → poolLiberadores, la lista que Payroll dejó en la propuesta. Sin
- *                lista de firmados: una sola liberación cierra el paso, así que
- *                mientras la tarea siga viva nadie ha liberado.
+ * La lista de cada rol sale de `campoPool`/`campoFirmados` (ROLES_FLUJO),
+ * que apuntan a lo que _mapearTarea dejó en la fila: apoderados usa
+ * poolPendientes/poolFirmantes (recalculados por BPA en cada firma);
+ * liberador usa poolLiberadores (la lista de la propuesta, sin firmados
+ * porque una sola liberación cierra el paso).
  */
 function _construirFirmantes(propuestaID, rol, tarea, referencia, nivelMinVivo) {
   const firmantes  = rol.campoFirmados ? (referencia[rol.campoFirmados] ?? []) : [];
   const pendientes = referencia[rol.campoPool] ?? [];
-
-  // Sin tarea viva del rol el paso ya pasó: nadie de la lista es accionable.
   const enTarea = tarea ? (tarea.destinatariosTarea ?? []) : [];
 
-  // Quiénes tienen fila. Las TRES listas hacen falta y por motivos distintos:
-  //
-  //   firmantes  → ya firmaron y salieron del pool. Sin ellos el admin no
-  //                entiende por qué la propuesta sigue abierta ni cuántas
-  //                firmas lleva.
-  //   enTarea    → los destinatarios REALES de la tarea en BPA. Es la única
-  //                lista donde aparece alguien metido por una reasignación:
-  //                el PATCH cambia recipientUsers de la tarea, no la variable
-  //                del contexto de la que salen las otras dos.
-  //                Omitirlo dejaba al sustituto SIN FILA —la pantalla seguía
-  //                mostrando al sustituido como si nada hubiera pasado, que es
-  //                justo lo que el administrador acababa de cambiar.
-  //   pendientes → los que el contexto da por pendientes y aún no tienen tarea
-  //                (ventana entre el loop back y la recreación de la tarea).
-  //
-  // normalizarUsuarios deduplica conservando el orden de aparición, así que el
-  // orden de la tabla es: primero quien firmó, luego quien puede firmar ahora.
+  // Las tres listas hacen falta: firmantes (ya firmaron), enTarea (los
+  // destinatarios reales de la tarea en BPA, donde se refleja una
+  // reasignación) y pendientes (los que el contexto da por pendientes y aún
+  // no tienen tarea). normalizarUsuarios deduplica conservando el orden.
   const todos = perfiles.normalizarUsuarios([...firmantes, ...enTarea, ...pendientes]);
 
-  // Sin nadie identificable se conserva UNA fila sin persona: el paso existe en
-  // el flujo aunque el contexto todavía no diga quién lo hará, y la tabla no
-  // debe perder el nivel. Es el caso de una propuesta sin usuarioLiberador.
+  // Sin nadie identificable se conserva una fila sin persona, para que la
+  // tabla no pierda el nivel (propuesta sin usuarioLiberador, por ejemplo).
   const personas = todos.length ? todos : [""];
 
   return personas.map(correo => {
     const yaFirmo = firmantes.includes(correo);
 
-    // Con la tarea del rol VIVA, todo el que no haya firmado tiene aún una firma
-    // pendiente y se puede reasignar. Deliberadamente NO se exige estar en
-    // enTarea (recipientUsers).
-    //
-    // Las dos listas divergen en la práctica: recipientUsers se fija al CREAR la
-    // tarea y una reasignación anterior pudo cambiarla, mientras que la lista
-    // del contexto es la que el BPMN recalcula en cada firma. Un apoderado que
-    // esté en la segunda pero no en la primera es justamente el que MÁS necesita
-    // el botón: no ve la tarea en su inbox —getInboxTasks filtra por
-    // recipientUsers— así que no puede firmar, y sin reasignarlo la propuesta se
-    // queda esperando a alguien que no puede actuar.
-    //
-    // Marcarlo "No requerido" era doblemente erróneo: ese estado significa que el
-    // quórum se cerró sin él, y el quórum no se ha cerrado si la tarea sigue viva.
+    // Con la tarea del rol viva, todo el que no haya firmado puede
+    // reasignarse, sin exigir que esté en enTarea (recipientUsers): esa lista
+    // puede quedar desactualizada respecto al contexto, y es precisamente el
+    // apoderado ausente de ella quien más necesita el botón.
     const tieneTarea = Boolean(tarea) && !yaFirmo;
 
     const base = {
       propuestaID,
-      // Clave única de la fila. El rol por sí solo dejó de identificarla en
-      // cuanto un rol pasó a tener N personas; el correo es lo que distingue a
-      // una persona de otra y lo que el handler necesita para saber A QUIÉN
-      // está sustituyendo dentro del pool. La fila sin persona conserva el rol
-      // a secas: no hay correo con el que componer una clave, y esa fila no es
-      // reasignable de todas formas.
+      // '<rol>#<correo>': el rol dejó de identificar una fila con N personas.
       firmanteID      : correo ? `${rol.clave}#${correo}` : rol.clave,
       rol             : rol.label,
       nivel           : rol.nivel,
       usuario         : correo,
-      // Instancia de workflow de la tarea. No está declarada en la entidad —no
-      // se muestra— pero la acción de reasignar la necesita para escribir la
-      // variable del contexto de la que BPA saca los destinatarios.
+      // No está en la entidad, pero la acción reasignar la necesita para
+      // escribir la variable del contexto de la que BPA saca destinatarios.
       workflowInstanceId: tarea?.workflowInstanceId ?? "",
-      // Solo el pool con quórum tiene contadores que enseñar. En el liberador
-      // van a cero, que es lo que la entidad Firmante documenta: su paso es una
-      // única aprobación, no una cuenta de firmas.
+      // Solo el pool con quórum tiene contadores; en el liberador van a cero.
       contadorFirmas  : rol.campoFirmados ? (referencia.contadorFirmas   ?? 0) : 0,
       firmasRequeridas: rol.campoFirmados ? (referencia.firmasRequeridas ?? 0) : 0,
     };
@@ -848,12 +696,9 @@ function _destinatariosVivos(tareas) {
 }
 
 /**
- * Punto del flujo en el que está la propuesta, según qué niveles siguen vivos.
- *
- * Los textos salen de config/estados.js —la misma tabla que usa la app de
- * aprobaciones— y no de literales locales: son el valor que compara el $filter
- * del desplegable "Estado", así que una tilde de diferencia entre las dos apps
- * dejaría un filtro sin resultados.
+ * Punto del flujo en el que está la propuesta, según qué niveles siguen
+ * vivos. Los textos salen de config/estados.js, la misma tabla que usa la
+ * app de aprobaciones.
  */
 function _estadoPropuesta(nivelesVivos) {
   if (nivelesVivos.includes(3)) return ESTADOS.LIBERACION;
@@ -862,32 +707,17 @@ function _estadoPropuesta(nivelesVivos) {
 }
 
 /**
- * Construye lanes y nodes del ProcessFlow para una propuesta.
- *
- * Se reutiliza tal cual domain/historial.service.js — la misma función pura que
- * alimenta el diagrama del Object Page de aprobaciones — pasándole filas en su
- * formato crudo. Así los dos diagramas comparten estados, colores, iniciales y
- * topología, y cualquier arreglo en esa normalización llega a los dos.
- *
- * DIFERENCIA CON APROBACIONES: allí el historial se fusiona con las firmas que
- * ECP registra (iFlow HistorialAprobaciones), así que los nodos ya firmados
- * llevan firmante real y fecha. Aquí no se consulta a ECP: el estado se deduce
- * de las tareas BPA vivas de la propuesta — si la de un apoderado ya no está y
- * la del otro sigue, el primero firmó.
- *
- * Lo que NO tenemos por esa vía son fechas ni comentarios de los pasos ya
- * firmados: eso vive en Payroll. Los nodos firmados salen sin fecha y la UI lo
- * advierte. Si algún día se quiere la fecha real aquí, el camino es el mismo que
- * usa aprobaciones: cpi-client.getHistorialAprobaciones + _fusionar.
+ * Construye lanes y nodes del ProcessFlow para una propuesta, reutilizando
+ * domain/historial.service.js. A diferencia de aprobaciones, aquí no se
+ * consulta a ECP: el estado se deduce de las tareas BPA vivas, así que los
+ * nodos firmados no llevan fecha ni comentario.
  */
 function _construirFlujo(propuestaID, referencia, firmantes) {
   const filas = _filasFlujo(referencia, firmantes);
   const { niveles, aprobadores } = histSvc.construirDesdeFilas(filas, propuestaID);
 
-  // construirDesdeFilas rotula la clave como `instanceID` porque en aprobaciones
-  // es la tarea; aquí la clave es la propuesta. Se renombra al salir en vez de
-  // parametrizar el módulo compartido, que no tiene por qué conocer a sus
-  // consumidores.
+  // construirDesdeFilas rotula la clave como `instanceID` (la tarea); aquí
+  // la clave es la propuesta.
   const aPropuesta = ({ instanceID, ...resto }) => ({ propuestaID, ...resto });
 
   return {
@@ -897,16 +727,9 @@ function _construirFlujo(propuestaID, referencia, firmantes) {
 }
 
 /**
- * Nombre para mostrar en la tarjeta del diagrama, a partir del correo.
- *
- * Se queda con la parte local ("arodas@centria.net" → "arodas") porque el nodo
- * del ProcessFlow en la columna media del FCL no da para más: con el correo
- * entero las tarjetas mostraban un recorte por el medio ("as@centri"), que no
- * identifica a nadie. El correo completo sigue estando en el tooltip del avatar,
- * que se enlaza a `usuario`.
- *
- * El nombre real de la persona no lo tenemos: vive en Payroll y llegaría con el
- * iFlow del historial (ver domain/historial.service.js).
+ * Nombre para mostrar en la tarjeta del diagrama: la parte local del correo
+ * ("arodas@centria.net" → "arodas"). El correo completo sigue en el tooltip
+ * del avatar, enlazado a `usuario`.
  */
 function _nombreCorto(correo) {
   return String(correo ?? "").split("@")[0] || String(correo ?? "");
@@ -914,25 +737,20 @@ function _nombreCorto(correo) {
 
 /**
  * Filas crudas en el formato del iFlow que espera histSvc.construirDesdeFilas.
- *
- * Se recorren los FIRMANTES y no los roles: con el pool de apoderados hay una
- * tarjeta por persona de la lista, no una por rol, y `orden` tiene que ser
- * correlativo dentro del nivel para que el diagrama no apile dos nodos con el
- * mismo nodeId (el `N{nivel}-{orden}` que construye historial.service.js).
+ * Se recorren los firmantes, no los roles: con el pool de apoderados hay una
+ * tarjeta por persona, y `orden` debe ser correlativo dentro del nivel.
  */
 function _filasFlujo(referencia, firmantes) {
   const filas = [];
 
-  // Nivel 1 — el analista que registró la propuesta en Payroll. Solo se añade si
-  // el contexto BPA lo trae: un nodo sin firmante lo descartaría la normalización
-  // igualmente, y el diagrama arrancaría en el nivel 2 sin romperse.
+  // Nivel 1: el analista que registró la propuesta en Payroll.
   const analista = referencia.analista || referencia.usuarioCreacion || "";
   if (analista) {
     filas.push({
       Nivel: 1, Orden: 1,
       Usuario: analista,
       Nombre : _nombreCorto(analista),
-      Cargo  : "Analista de Nómina",
+      Cargo  : "Analista",
       Perfil : "AN",
       Decision: "REGISTRADO",
     });
@@ -985,25 +803,13 @@ function _conEstadoNivel(tarea) {
   };
 }
 
-/**
- * Versión de texto de las listas del quórum, para las propiedades String de
- * TareasEnCurso.
- *
- * Las listas se manejan como arrays dentro del servicio porque hay que
- * filtrarlas y compararlas en cada paso, pero OData las expone como cadenas: la
- * entidad no declara colecciones y una propiedad String que recibiera un array
- * se serializaría mal. La conversión se hace una sola vez, al final de la
- * tubería, por el mismo motivo que el formato del importe.
- */
+/** Versión de texto de las listas del quórum, para las propiedades String de TareasEnCurso. */
 function _conListasTexto(tarea) {
   return {
     ...tarea,
     usuariosApoderados  : (tarea.poolApoderados  ?? []).join(", "),
     apoderadosFirmantes : (tarea.poolFirmantes   ?? []).join(", "),
     apoderadosPendientes: (tarea.poolPendientes  ?? []).join(", "),
-    // Se recompone desde la lista normalizada en vez de reenviar el CSV crudo de
-    // Payroll: así la columna se lee igual que las de apoderados —", " y sin
-    // duplicados— venga uno o vengan cuatro correos.
     usuarioLiberador    : (tarea.poolLiberadores ?? []).join(", "),
     destinatarios       : (tarea.destinatariosTarea ?? []).join(", "),
     firmasTexto         : tarea.firmasRequeridas
@@ -1014,8 +820,7 @@ function _conListasTexto(tarea) {
 
 /**
  * Obtiene y enriquece la lista de tareas BPA en curso, filtrando solo las
- * que corresponden a un rol activo (apoderado1, apoderado2, liberador).
- * Si BPA no está disponible, cae a un mock local para desarrollo.
+ * que corresponden a un rol activo. Si BPA no está disponible, cae a un mock local.
  */
 async function _obtenerTareasEnCurso() {
   try {
@@ -1025,19 +830,16 @@ async function _obtenerTareasEnCurso() {
     const relevantes = tareasRaw
       .map(tarea => ({ tarea, rol: perfiles.resolverRolBpa(tarea.activityId ?? tarea.definitionId) }))
       .filter(({ rol }) => rol && rol.activo)
-      // listarTareasEnCurso() combina READY + RESERVED (cada una ya ordenada
-      // por BPA), pero al mezclarlas el orden global se pierde — se reordena
-      // aquí por fecha de creación de la instancia, más reciente primero.
+      // Reordena por fecha de creación (más reciente primero): al combinar
+      // READY + RESERVED, listarTareasEnCurso() pierde el orden global.
       .sort((a, b) => new Date(b.tarea.createdAt ?? 0) - new Date(a.tarea.createdAt ?? 0));
 
     const tareas = await Promise.all(relevantes.map(({ tarea, rol }) => _mapearTarea(tarea, rol)));
-    // El formato de importe y estado se aplica en la salida —y no dentro de
-    // cada rama— para que las tareas reales y las del mock se muestren igual.
-    return tareas.map(_conImporteFormateado).map(_conEstadoNivel).map(_conListasTexto).map(_conClavePropuesta);
+    return tareas.map(_conImporteFormateado).map(_conFechasFormateadas).map(_conEstadoNivel).map(_conListasTexto).map(_conClavePropuesta);
 
   } catch (error) {
     LOG.warn(`[_obtenerTareasEnCurso] BPA no disponible — usando mock | ${error.message}`);
-    return _getMockTareasEnCurso().map(_conImporteFormateado).map(_conEstadoNivel).map(_conListasTexto).map(_conClavePropuesta);
+    return _getMockTareasEnCurso().map(_conImporteFormateado).map(_conFechasFormateadas).map(_conEstadoNivel).map(_conListasTexto).map(_conClavePropuesta);
   }
 }
 
@@ -1057,20 +859,17 @@ async function _mapearTarea(tarea, rol) {
     LOG.warn(`[_mapearTarea] readContext falló | id=${tarea.id} | ${error.message}`);
   }
 
-  // Estado del quórum. Solo tiene sentido en la tarea de apoderado, pero se
-  // calcula siempre porque es barato y deja la fila homogénea.
+  // Estado del quórum; se calcula siempre aunque solo aplique a apoderado, para
+  // que la fila sea homogénea.
   const quorum = perfiles.resolverQuorumApoderados(contexto, propuesta);
 
-  // La lista de liberadores, por el mismo motivo: es un dato de la PROPUESTA
-  // —no de esta tarea— y las filas de firmante del nivel 3 se componen desde
-  // cualquiera de las tareas vivas del grupo, sea del rol que sea.
+  // Lista de liberadores: dato de la propuesta, usado por las filas de
+  // firmante del nivel 3 sin importar de qué rol venga esta tarea.
   const liberadores = perfiles.resolverDestinatarios(
     perfiles.ROLES_BPA.liberador, contexto, propuesta).pendientes;
 
-  // Destinatarios REALES de la tarea en BPA. En los dos roles pueden ser varios;
-  // leerlos de recipientUsers y no del contexto es lo que hace que una
-  // reasignación previa se vea reflejada. Si BPA no los devolviera, la lista del
-  // contexto para ESTE rol es el mejor respaldo disponible.
+  // Destinatarios reales de la tarea (recipientUsers): refleja una
+  // reasignación previa. Sin ellos, se cae al pendientes del contexto.
   const destinatarios = perfiles.normalizarUsuarios(tarea.recipientUsers);
   const enTarea = destinatarios.length
     ? destinatarios
@@ -1081,49 +880,40 @@ async function _mapearTarea(tarea, rol) {
     tituloTarea        : tarea.subject ?? propuesta.tituloTarea ?? "",
     numeroPropuesta    : propuesta.numeroPropuesta ?? "",
     sociedad           : propuesta.sociedad ?? "",
-    banco              : propuesta.banco ?? "",
+    banco              : propuesta.banco            ?? "",
+    bancoDescripcion   : propuesta.bancoDescripcion ?? "",
+    grupoPersonal      : grupoPersonal(propuesta.tipoTrabajador),
     importe            : propuesta.importe ?? "",
     moneda             : propuesta.moneda ?? "",
     fechaPropuestaPago : propuesta.fechaPropuestaPago ?? "",
     fechaPago          : propuesta.fechaPago ?? "",
     rolTarea           : rol.label,
 
-    // usuarioActual se conserva —la columna de TareasEnCurso y su ayuda de
-    // búsqueda siguen siendo por persona— pero ya no es LA verdad: con pool hay
-    // varios destinatarios y el que manda es `destinatariosTarea`.
+    // Con pool hay varios destinatarios; el que manda es `destinatariosTarea`.
     usuarioActual      : enTarea[0] ?? "",
     destinatariosTarea : enTarea,
 
     estadoTarea        : tarea.status ?? "",
     workflowInstanceId : tarea.workflowInstanceId ?? "",
 
-    // Los firmantes de la propuesta según el contexto BPA. Van como ARRAYS y
-    // con prefijo `pool` porque son de uso interno —de aquí salen las filas de
-    // Firmante y los nodos del diagrama—; las versiones de texto que sí viajan
-    // en TareasEnCurso las añade _conListasTexto al final de la tubería.
+    // Uso interno (filas de Firmante y nodos del diagrama); las versiones de
+    // texto las añade _conListasTexto.
     poolApoderados     : quorum.originales,
     poolFirmantes      : quorum.firmantes,
     poolPendientes     : quorum.pendientes,
     contadorFirmas     : quorum.contador,
     firmasRequeridas   : quorum.requeridas,
-
-    // Los liberadores designados, ya normalizados a lista. El campo de texto
-    // usuarioLiberador que viaja en TareasEnCurso lo compone _conListasTexto a
-    // partir de este array, igual que las tres listas de apoderados.
     poolLiberadores    : liberadores,
 
-    // Quién registró la propuesta en Payroll. No se muestra como columna: es el
-    // primer nodo del diagrama de flujo (nivel 1, "Registrado"), el punto de
-    // partida que explica de dónde viene la propuesta.
+    // Quién registró la propuesta en Payroll: primer nodo del diagrama (nivel 1, "Registrado").
     analista           : propuesta.analista        ?? "",
     usuarioCreacion    : propuesta.usuarioCreacion ?? "",
   };
 }
 
 /**
- * Normaliza el contexto BPA a la propuesta de negocio.
- * Misma lógica que _extraerPropuesta en pagos-service.js — duplicada aquí
- * porque cada servicio mantiene sus helpers privados de mapeo.
+ * Normaliza el contexto BPA a la propuesta de negocio. Misma lógica que
+ * _extraerPropuesta en pagos-service.js, duplicada como helper privado.
  */
 function _extraerPropuesta(contexto) {
   if (!contexto || typeof contexto !== "object") return {};
@@ -1141,9 +931,9 @@ function _extraerPropuesta(contexto) {
 
 /**
  * Mock de tareas en curso para poder probar la app de reasignación sin BPA.
- * Cubre los dos roles activos, los dos momentos del quórum de apoderados y el
- * caso que motivó el pool del liberador: DOS correos en usuarioLiberador, que
- * tienen que salir como dos filas reasignables y dos tarjetas del nivel 3.
+ * Cubre los dos roles activos, los dos momentos del quórum de apoderados y
+ * dos correos en usuarioLiberador. Fechas en ISO (yyyy-MM-dd), como entrega
+ * BPA, parte de la clave de la propuesta.
  */
 function _getMockTareasEnCurso() {
   const APODERADOS = [
@@ -1152,8 +942,7 @@ function _getMockTareasEnCurso() {
     "mvargas@centria.net",
   ];
 
-  // Payroll manda esto como "cpanduro@centria.net,jlicetti@centria.net" en un
-  // solo campo; aquí ya va normalizado, que es como lo deja _mapearTarea.
+  // Ya normalizado, como lo deja _mapearTarea.
   const LIBERADORES = [
     "cpanduro@centria.net",
     "jlicetti@centria.net",
@@ -1163,8 +952,6 @@ function _getMockTareasEnCurso() {
   const tarea = ({ firmantes = [], ...fila }) => {
     const pendientes = APODERADOS.filter(correo => !firmantes.includes(correo));
     const esApoderado = fila.rolTarea === perfiles.ROLES_BPA.apoderado.label;
-    // Los destinatarios de la tarea son TODA la lista del rol que la tiene: es
-    // lo que devuelve recipientUsers en BPA, en los dos roles.
     const destinatarios = esApoderado ? pendientes : LIBERADORES;
     return {
       poolApoderados      : APODERADOS,
@@ -1187,8 +974,10 @@ function _getMockTareasEnCurso() {
     tarea({
       instanceID: "mock-task-101",
       tituloTarea: "0025-R4701-BCP-05/08/2026-A", numeroPropuesta: "R4701",
-      sociedad: "0025", banco: "BCP", importe: "15200.50", moneda: "PEN",
-      fechaPropuestaPago: "05-08-2026", fechaPago: "05-08-2026",
+      sociedad: "0025", banco: "BCP", bancoDescripcion: "001 - BCP Soles",
+      grupoPersonal: grupoPersonal("E"),
+      importe: "15200.50", moneda: "PEN",
+      fechaPropuestaPago: "2026-08-05", fechaPago: "2026-08-05",
       rolTarea: "Apoderado",
       estadoTarea: "READY", workflowInstanceId: "wf-mock-101-apo",
       firmantes: [],
@@ -1199,8 +988,10 @@ function _getMockTareasEnCurso() {
     tarea({
       instanceID: "mock-task-105",
       tituloTarea: "0025-R4705-BBVA-06/08/2026-A", numeroPropuesta: "R4705",
-      sociedad: "0025", banco: "BBVA", importe: "77777.77", moneda: "PEN",
-      fechaPropuestaPago: "06-08-2026", fechaPago: "06-08-2026",
+      sociedad: "0025", banco: "BBVA", bancoDescripcion: "011 - BBVA Soles",
+      grupoPersonal: grupoPersonal("P"),
+      importe: "77777.77", moneda: "PEN",
+      fechaPropuestaPago: "2026-08-06", fechaPago: "2026-08-06",
       rolTarea: "Apoderado",
       estadoTarea: "READY", workflowInstanceId: "wf-mock-105-apo",
       firmantes: ["arodas@centria.net"],
@@ -1210,8 +1001,10 @@ function _getMockTareasEnCurso() {
     tarea({
       instanceID: "mock-task-103",
       tituloTarea: "0025-R4703-BCP-07/08/2026-L", numeroPropuesta: "R4703",
-      sociedad: "0025", banco: "BCP", importe: "43038.69", moneda: "PEN",
-      fechaPropuestaPago: "07-08-2026", fechaPago: "07-08-2026",
+      sociedad: "0025", banco: "BCP", bancoDescripcion: "001 - BCP Soles",
+      grupoPersonal: grupoPersonal("E"),
+      importe: "43038.69", moneda: "PEN",
+      fechaPropuestaPago: "2026-08-07", fechaPago: "2026-08-07",
       rolTarea: "Liberador Final",
       estadoTarea: "RESERVED", workflowInstanceId: "wf-mock-103-raiz",
       firmantes: ["arodas@centria.net", "jgonzales@centria.net"],

@@ -1,51 +1,32 @@
 "use strict";
 /**
- * srv/domain/reasignacion.service.js
- *
  * Handler de la acción bound reasignar de Firmante (ReasignacionService).
  *
  * Sustituye a una persona en los destinatarios (recipientUsers) de una tarea
  * BPA en curso, para los dos roles activos: Apoderado y Liberador Final.
- * Pensado para cuando el destinatario original no está disponible.
+ * Los dos roles tienen un pool de destinatarios, así que se envía la lista
+ * completa con el correo saliente cambiado por el entrante — nunca el
+ * sustituto a secas, que dejaría la tarea con un único destinatario.
  *
- * ── SUSTITUIR, NO REEMPLAZAR ─────────────────────────────────────────────────
- *
- * Los DOS roles activos tienen un POOL de destinatarios: los apoderados desde el
- * quórum de v1.2.0, y el liberador desde que Payroll puede dejar varios correos
- * en usuarioLiberador. Mandar a BPA el correo del sustituto a secas dejaría la
- * tarea con un único destinatario y expulsaría del flujo a los demás. Por eso se
- * envía la lista COMPLETA con el correo saliente cambiado por el entrante: el
- * pool conserva a los demás.
- *
- * ── DOS ESCRITURAS, NO UNA ───────────────────────────────────────────────────
- *
- * Reasignar de verdad son dos cambios en BPA, y hacen falta los dos:
- *
+ * Una reasignación completa requiere dos escrituras en BPA:
  *   1. PATCH de la TAREA (recipientUsers) — el sustituto ve la tarea ya mismo.
  *   2. PATCH del CONTEXTO de la instancia — la variable de la que BPA saca los
- *      destinatarios al CREAR la tarea (custom.apoderadospendientes en los
+ *      destinatarios al crear la tarea (custom.apoderadospendientes en los
  *      apoderados, startEvent.propuesta.usuarioLiberador en el liberador).
- *
- * Sin el paso 2 la reasignación es un parche sobre una instancia de tarea: el
- * sustituido reaparece en la pantalla de reasignación y en el diagrama —que se
- * componen desde el contexto, porque la Workflow API no devuelve recipientUsers
- * al leer una tarea— y el flujo lo recupera en cuanto hace loop back por un
- * rechazo de Payroll o por la siguiente firma del quórum.
- *
- * El paso 2 no es crítico: si falla, el 1 ya surtió efecto y se avisa al
- * administrador de que el cambio puede no sobrevivir a un loop back.
+ * Sin el paso 2, el sustituido reaparece en la app de reasignación (que
+ * compone los firmantes desde el contexto) y el flujo lo recupera en el
+ * siguiente loop back. El paso 2 no es crítico: si falla, el 1 ya surtió
+ * efecto y se avisa al administrador.
  *
  * Principio anti-tampering (igual que aprobacion.service.js):
  *   - instanceID    → siempre de req.params    (nunca del body del cliente)
- *   - taskDefId     → releído de BPA, no del body — evita reasignar tareas
- *                     fuera del alcance de los roles activos
+ *   - taskDefId     → releído de BPA, no del body
  *   - admin         → siempre de req.user.id   (XSUAA, no modificable)
  *   - nuevoUsuario  → único campo aceptado del cliente, validado
  *
- * IMPORTANTE: bpaClient.reasignarTarea() requiere que la identidad detrás
- * del destino BPA_WORKFLOW (no el destino en sí) tenga el role collection
- * "WorkflowAdmin" en el subaccount de Process Automation — ver notas de
- * verificación pendiente en infrastructure/bpa-client.js.
+ * bpaClient.reasignarTarea() requiere que la identidad detrás del destino
+ * BPA_WORKFLOW tenga el role collection "WorkflowAdmin" en el subaccount de
+ * Process Automation.
  */
 
 const cds      = require("@sap/cds");
@@ -57,35 +38,18 @@ const LOG = cds.log("reasignacion-service");
 const REGEX_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
- * Escribe la reasignación en el CONTEXTO de la instancia, no solo en la tarea.
+ * Escribe la reasignación en el contexto de la instancia (además de la tarea),
+ * para que sea duradera: si el flujo hace loop back, BPA recrea la tarea desde
+ * el contexto y una reasignación que solo tocó la tarea se deshace sola.
  *
- * EL PATCH DE LA TAREA NO BASTA
- * -----------------------------
- * bpaClient.reasignarTarea() cambia recipientUsers de la instancia de tarea que
- * está viva ahora. Eso es lo que hace que el sustituto vea la tarea de inmediato
- * —y funciona—, pero no toca las variables de las que BPA saca los destinatarios
- * cuando CREA la tarea. Mientras esas variables sigan con el sustituido:
- *
- *   · la app de reasignación lo sigue mostrando a él, en la lista y en el
- *     diagrama, porque compone los firmantes desde el contexto y no desde
- *     recipientUsers (que la Workflow API no devuelve al leer una tarea);
- *   · en cuanto el flujo hace loop back, BPA recrea la tarea desde la variable
- *     y la reasignación se deshace sola.
- *
- * Esta función cierra las dos cosas a la vez, que es lo que convierte la
- * reasignación en un cambio duradero en vez de un parche sobre una instancia.
- *
- * Es leer-modificar-escribir CON EL CONTEXTO ENTERO delante: el PATCH de
- * contexto sustituye las ramas de primer nivel que recibe, así que se devuelve
- * la rama completa con una sola hoja cambiada. Ver actualizarContextoInstancia.
- *
- * NO es crítica: si falla, la tarea ya quedó reasignada y el sustituto puede
- * trabajar. Se informa al administrador de que el cambio puede no sobrevivir a
- * un loop back, en vez de fingir un éxito completo o abortar algo ya hecho.
+ * Lee-modifica-escribe con el contexto entero: el PATCH de contexto sustituye
+ * las ramas de primer nivel que recibe, así que se devuelve la rama completa
+ * con una sola hoja cambiada. No crítica: si falla, la tarea ya quedó
+ * reasignada y el sustituto puede trabajar.
  *
  * @param {string} workflowInstanceId - instancia de workflow de la tarea
  * @param {object} rolBpa             - rol de la tarea (resolverRolBpa())
- * @param {string[]} destinatarios    - lista COMPLETA ya sustituida
+ * @param {string[]} destinatarios    - lista completa ya sustituida
  * @returns {Promise<{ success: boolean, mensaje: string }>}
  */
 async function _persistirEnContexto(workflowInstanceId, rolBpa, destinatarios) {
@@ -98,23 +62,14 @@ async function _persistirEnContexto(workflowInstanceId, rolBpa, destinatarios) {
         return { success: false, mensaje: "no se pudo leer el contexto de la instancia" };
     }
 
-    // Dónde vive la lista de destinatarios según el rol:
-    //   apoderados → custom.apoderadospendientes, CSV que el BPMN recalcula en
-    //                cada firma y del que salen los destinatarios de la tarea.
-    //   liberador  → startEvent.propuesta.usuarioLiberador, el CSV que dejó
-    //                Payroll. Nadie más lo recalcula, así que este PATCH es lo
-    //                único que puede cambiarlo.
-    // La rama la decide campoPendientes y no esPool: los dos roles son pools,
-    // pero solo los apoderados tienen variable propia (ver config/perfiles.js).
+    // Dónde vive la lista de destinatarios según el rol: apoderados en
+    // custom.apoderadospendientes (recalculado por BPA en cada firma);
+    // liberador en startEvent.propuesta.usuarioLiberador (el CSV de Payroll,
+    // que nadie más recalcula). La rama la decide campoPendientes.
     const ruta = rolBpa.campoPendientes
         ? _rutaCustom(contexto, rolBpa.campoPendientes)
         : `${rolBpa.contextPath}.${rolBpa.campoPropuesta}`;
 
-    // SIEMPRE la lista completa, nunca solo el entrante. Escribir el correo
-    // suelto es lo que borraba a los demás liberadores del contexto: la tarea
-    // conservaba a todos (paso 6) pero el contexto se quedaba con uno, y el
-    // siguiente loop back recreaba la tarea para esa única persona. Con un solo
-    // destinatario el resultado es el mismo de antes: su correo, a secas.
     const valor = destinatarios.join(",");
 
     const parche = _parcheRuta(contexto, ruta, valor);
@@ -127,13 +82,8 @@ async function _persistirEnContexto(workflowInstanceId, rolBpa, destinatarios) {
 
 /**
  * Ruta de una variable personalizada, respetando cómo esté escrita en el
- * contexto real.
- *
- * BPA expone `custom` en minúsculas y config/perfiles.js declara los nombres así,
- * pero se busca la clave por comparación insensible a mayúsculas antes de
- * componer la ruta: escribir "apoderadospendientes" cuando la instancia tiene
- * "apoderadosPendientes" no daría error, crearía una variable NUEVA que nadie
- * lee y dejaría la vieja intacta — un fallo silencioso, que es el peor de todos.
+ * contexto real. Busca por comparación insensible a mayúsculas para no crear
+ * una variable nueva si BPA la tiene con otra capitalización.
  */
 function _rutaCustom(contexto, campo) {
     const custom = contexto?.custom;
@@ -143,21 +93,14 @@ function _rutaCustom(contexto, campo) {
 }
 
 /**
- * Devuelve la rama de PRIMER NIVEL del contexto con una sola hoja cambiada,
- * lista para el PATCH.
- *
- * Se clona antes de tocar nada: el contexto que llega es la respuesta de BPA y
- * mutarlo escondería el cambio en un objeto que otros pasos siguen leyendo.
- *
- * Devuelve null si la ruta no existe en el contexto —rama intermedia ausente o
- * que no es un objeto—. No se crean ramas: si la variable no está donde el rol
- * dice que debería, lo correcto es avisar, no inventarse una estructura que el
- * BPMN no lee.
+ * Devuelve la rama de primer nivel del contexto con una sola hoja cambiada,
+ * lista para el PATCH. Clona antes de mutar. Devuelve null si la ruta no
+ * existe en el contexto (no se crean ramas nuevas).
  *
  * @param {object} contexto - contexto completo de la instancia
  * @param {string} ruta     - ruta con puntos (ej. "custom.apoderadospendientes")
  * @param {any}    valor    - valor de la hoja
- * @returns {object|null} objeto con UNA clave de primer nivel, o null
+ * @returns {object|null} objeto con una clave de primer nivel, o null
  */
 function _parcheRuta(contexto, ruta, valor) {
     const claves = String(ruta ?? "").split(".").filter(Boolean);
@@ -181,30 +124,14 @@ function _parcheRuta(contexto, ruta, valor) {
 /**
  * Quién puede firmar todavía esta tarea, según BPA, ahora mismo.
  *
- * Devuelve DOS listas porque BPA tiene dos y no siempre coinciden:
+ * Devuelve dos listas: `enTarea` (recipientUsers de la instancia de tarea —
+ * quién la ve) y `pool` (unión con la lista del contexto — quién debería
+ * poder firmar). Se usa la unión porque recipientUsers se fija al crear la
+ * tarea y la variable del contexto la recalcula el BPMN en cada firma; una
+ * reasignación anterior puede dejarlas desincronizadas.
  *
- *   enTarea → recipientUsers de la instancia de tarea. Es quien VE la tarea:
- *             el inbox de la app de aprobaciones filtra por este campo.
- *   pool    → la unión de esa lista con la del contexto
- *             (custom.apoderadospendientes en los apoderados,
- *             startEvent.propuesta.usuarioLiberador en el liberador). Es quien
- *             DEBERÍA poder firmar.
- *
- * POR QUÉ LA UNIÓN Y NO SOLO recipientUsers
- * -----------------------------------------
- * recipientUsers se fija al crear la tarea; apoderadospendientes lo recalcula el
- * BPMN en cada firma. Una reasignación anterior —o un loop back— deja a gente en
- * la segunda que no está en la primera: no ve la tarea, no puede firmar, y era
- * precisamente a quien había que reasignar. Validar contra recipientUsers a
- * secas le contestaba "ya no es destinatario de esta tarea" y dejaba la
- * propuesta bloqueada esperando a alguien incapaz de actuar.
- *
- * POR QUÉ recipientUsers CASI SIEMPRE LLEGA VACÍO AQUÍ
- * ---------------------------------------------------
- * `recipientUsers` es de FILTRO y de ESCRITURA en la Workflow Runtime API: va
- * como query param del GET de colección y en el cuerpo del PATCH, pero el
- * TaskInstance que devuelve GET /v1/task-instances/{id} no lo trae. Por eso el
- * contexto no es un respaldo excepcional sino la fuente habitual en este punto.
+ * `recipientUsers` casi siempre llega vacío: es de filtro/escritura en la
+ * Workflow Runtime API, pero el GET de detalle de tarea no lo devuelve.
  *
  * @returns {Promise<{ enTarea: string[], pool: string[] }>}
  */
@@ -228,11 +155,7 @@ async function _poolDeLaTarea(instanceID, tareaBpa, rolBpa) {
     return { enTarea, pool };
 }
 
-/**
- * Navega un objeto JSON siguiendo una ruta con puntos ("startEvent.body").
- * Gemela de la de aprobacion.service.js: cada handler de dominio mantiene sus
- * helpers privados en vez de acoplarse al otro.
- */
+/** Navega un objeto JSON siguiendo una ruta con puntos ("startEvent.body"). */
 function _navegarRuta(objeto, ruta) {
     return String(ruta ?? "").split(".").reduce(
         (acumulador, clave) => (acumulador != null ? acumulador[clave] : undefined),
@@ -246,30 +169,19 @@ function _navegarRuta(objeto, ruta) {
  * @param {import('@sap/cds').ApplicationService} srv - instancia de ReasignacionService
  * @param {object} deps
  * @param {(propuestaID: string, firmanteID: string) => Promise<object|undefined>} deps.buscarFirmante
- *        Resuelve el firmante (y con él su tarea BPA) desde la clave de la
- *        acción. Se inyecta en vez de importarse porque quien sabe agrupar
- *        tareas en propuestas es reasignacion-service.js; este módulo se queda
- *        con la regla de negocio, igual que aprobacion.service.js.
+ *        Resuelve el firmante (y con él su tarea BPA) desde la clave de la acción.
  */
 function registrarHandlers(srv, { buscarFirmante }) {
 
     srv.on("reasignar", "Firmante", async (req) => {
-        // 1. Clave del firmante desde los parámetros de ruta OData.
-        //    NUNCA del body: el cliente solo aporta el nuevo destinatario.
-        //    La clave es firmanteID y no el rol: con el pool de apoderados un
-        //    mismo rol tiene varias filas y el rol dejó de identificar a nadie.
+        // 1. Clave del firmante (nunca del body); el cliente solo aporta el
+        //    nuevo destinatario.
         const { propuestaID, firmanteID } = req.params?.[req.params.length - 1] ?? {};
         if (!propuestaID || !firmanteID) {
             return req.reject(400, "Falta la clave del firmante (propuesta y firmante)");
         }
 
-        // 2. Resolver su tarea. Un firmante sin firma pendiente no es
-        //    reasignable: BPA crea la instancia de tarea cuando el flujo llega a
-        //    ese paso, así que el liberador de una propuesta que sigue en
-        //    apoderados no tiene nada que parchear; y un apoderado que ya firmó
-        //    tampoco, aunque la tarea siga viva para sus compañeros. La UI ya lo
-        //    muestra inactivo; esto cierra la puerta por si la acción se invoca
-        //    directamente contra el servicio.
+        // 2. Resolver su tarea. Sin firma pendiente no hay nada que reasignar.
         const firmante = await buscarFirmante(propuestaID, firmanteID);
         if (!firmante) {
             return req.reject(404, `No se encontró el firmante ${firmanteID} de la propuesta ${propuestaID}`);
@@ -290,10 +202,8 @@ function registrarHandlers(srv, { buscarFirmante }) {
             return req.reject(400, `"${nuevoUsuario}" no es un correo válido`);
         }
 
-        // 4. Releer la tarea en BPA y validar que sigue siendo un rol activo
-        //    en alcance (Apoderado1, Apoderado2 o Liberador Final).
-        //    El firmante viene de un snapshot con TTL: releer aquí es lo que
-        //    evita actuar sobre una tarea que ya se completó mientras tanto.
+        // 4. Releer la tarea en BPA (el snapshot puede estar desactualizado) y
+        //    validar que sigue siendo un rol activo en alcance.
         let tareaBpa;
         try {
             tareaBpa = await bpaClient.obtenerTarea(instanceID);
@@ -314,20 +224,12 @@ function registrarHandlers(srv, { buscarFirmante }) {
             return req.reject(403, "Esta tarea no corresponde a un rol reasignable (Apoderado o Liberador Final)");
         }
 
-        // 5. Componer las listas nuevas SUSTITUYENDO al saliente.
-        //
-        //    Se parte de lo que BPA tiene ahora mismo —no del snapshot— porque
-        //    entre la lectura de la lista y esta llamada pudo firmar alguien y
-        //    salir del pool. Reenviar una lista vieja le devolvería la tarea a
-        //    quien ya firmó.
+        // 5. Componer las listas nuevas sustituyendo al saliente por el
+        //    entrante, a partir del estado actual en BPA (no del snapshot).
         const { enTarea, pool } = await _poolDeLaTarea(instanceID, tareaBpa, rolBpa);
         const saliente = String(firmante.usuario ?? "").trim().toLowerCase();
         const entrante = nuevoUsuario.toLowerCase();
 
-        // Sin lista no hay sustitución posible: mandar solo al entrante dejaría
-        // la tarea con un único destinatario y expulsaría al resto del pool.
-        // Es un fallo de lectura contra BPA, no un cambio de estado de la tarea,
-        // así que NO se puede reportar como "el saliente ya firmó".
         if (!pool.length) {
             LOG.error(`reasignar | destinatarios no resolubles | instanceID=${instanceID} rol=${rolBpa.label}`);
             return req.reject(502,
@@ -339,11 +241,6 @@ function registrarHandlers(srv, { buscarFirmante }) {
             return req.reject(400, `${nuevoUsuario} ya es destinatario de esta tarea`);
         }
         if (!pool.includes(saliente)) {
-            // Ni en los destinatarios de la tarea ni en el pool del contexto:
-            // firmó, o lo reasignó otro administrador mientras esta pantalla
-            // mostraba datos del snapshot. Se registran las dos listas: es la
-            // única forma de distinguir en el log ese caso legítimo de un
-            // desajuste entre lo que pinta la UI y lo que BPA tiene.
             LOG.warn(
                 `reasignar | saliente fuera del pool | instanceID=${instanceID} ` +
                 `saliente=${saliente} pool=${pool.join(",")}`
@@ -353,22 +250,14 @@ function registrarHandlers(srv, { buscarFirmante }) {
                 "Actualice la lista para ver el estado actual de la propuesta.");
         }
 
-        // Sustituir donde esté, y AÑADIR donde el saliente no figure. El segundo
-        // caso es real y es el que desbloquea la propuesta: el saliente está en
-        // el pool del contexto pero BPA nunca le dio la tarea, así que en
-        // recipientUsers no hay nada que reemplazar — lo que falta es que el
-        // entrante entre en la lista de quien sí la ve.
+        // Sustituir donde esté, o añadir donde el saliente no figure (está en
+        // el pool del contexto pero BPA nunca le dio la tarea).
         const sustituir = lista => lista.includes(saliente)
             ? lista.map(correo => (correo === saliente ? entrante : correo))
             : [...lista, entrante];
 
-        // Las dos escrituras del paso 6 y 7, cada una con su lista:
-        //   destinatarios → recipientUsers de la tarea (quién la ve)
-        //   pendientes    → la variable del contexto  (quién debe firmar)
-        // Se parte de `pool` cuando la API no devolvió recipientUsers, que es lo
-        // habitual en el GET de detalle; el efecto secundario es deseable: las
-        // dos listas quedan CONVERGIDAS después de cada reasignación, y la
-        // divergencia que hacía falta arreglar deja de propagarse.
+        // Dos escrituras, cada una con su lista: destinatarios → recipientUsers
+        // de la tarea; pendientes → la variable del contexto.
         const destinatarios = sustituir(enTarea.length ? enTarea : pool);
         const pendientes    = sustituir(pool);
 
@@ -381,9 +270,7 @@ function registrarHandlers(srv, { buscarFirmante }) {
         }
 
         // 7. Hacer duradera la reasignación escribiendo el contexto de la
-        //    instancia. El paso 6 solo cambió la tarea viva; sin esto el
-        //    sustituido reaparece en la pantalla y vuelve al flujo en el
-        //    siguiente loop back. No es crítico: si falla, se avisa y se sigue.
+        //    instancia. No crítico: si falla, se avisa y se sigue.
         const persistencia = await _persistirEnContexto(
             firmante.workflowInstanceId, rolBpa, pendientes);
 
@@ -394,26 +281,18 @@ function registrarHandlers(srv, { buscarFirmante }) {
             );
         }
 
-        // 8. Auditoría — quién reasignó qué, de quién a quién, en qué propuesta
+        // 8. Auditoría
         LOG.info(
             `reasignar OK | admin=${req.user.id} propuesta=${propuestaID} instanceID=${instanceID} ` +
             `rol=${rolBpa.label} usuarioAnterior=${saliente} nuevoUsuario=${entrante} ` +
             `destinatarios=${destinatarios.join(",")}`
         );
 
-        // La coletilla depende de si queda alguien más en la tarea, no del rol:
-        // con pool en los dos roles, un liberador de una lista de tres necesita
-        // esa aclaración tanto como un apoderado, y el liberador único de
-        // siempre no debe recibirla.
         const base = destinatarios.length > 1
             ? `${rolBpa.label} reasignado de ${saliente} a ${entrante}. ` +
               `Los demás destinatarios de la tarea la conservan.`
             : `${rolBpa.label} reasignado de ${saliente} a ${entrante}`;
 
-        // La advertencia va en el mensaje de éxito y no en un error: la tarea SÍ
-        // quedó reasignada y el sustituto ya puede trabajar. Lo que el
-        // administrador necesita saber es que el cambio puede deshacerse solo si
-        // el flujo vuelve atrás, para que lo vigile en vez de darlo por cerrado.
         const mensaje = persistencia.success
             ? base
             : `${base} Aviso: no se pudo actualizar el contexto del flujo, así que ` +

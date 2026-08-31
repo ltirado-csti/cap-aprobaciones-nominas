@@ -1,36 +1,20 @@
-// =============================================================================
-// srv/reasignacion-service.cds
+// Servicio de administración para reasignar el destinatario de una tarea de
+// aprobación en curso (Apoderado o Liberador Final) a otro usuario, cuando el
+// destinatario original no está disponible.
 //
-// DEFINICIÓN de dominio: servicio de administración para reasignar el
-// destinatario de una tarea de aprobación en curso (Apoderado o Liberador
-// Final) a otro usuario, cuando el destinatario original no está disponible.
+// Los apoderados son una lista de N usuarios equivalentes sobre una sola
+// tarea con pool de destinatarios (quórum de 2 firmas): una tarea BPA puede
+// producir varias filas de firmante, y reasignar sustituye a una persona
+// dentro de la lista de destinatarios, nunca reemplaza la lista entera.
 //
-// ── QUÓRUM DE APODERADOS (BPA v1.2.0) ────────────────────────────────────────
-//
-// Los apoderados dejaron de ser dos usuarios fijos: ahora son una lista de N
-// usuarios equivalentes sobre UNA SOLA tarea con pool de destinatarios, de la
-// que bastan dos firmas cualesquiera. Eso cambia la aritmética de esta app:
-// una tarea BPA puede producir VARIAS filas de firmante, una por miembro del
-// pool, y reasignar significa sustituir a una persona dentro de la lista de
-// destinatarios — nunca reemplazar la lista entera por un solo correo.
-//
-// NO contiene anotaciones @UI (viven en app/ui5-reasignacion/annotations.cds).
-// NO contiene lógica de negocio (vive en reasignacion-service.js /
-// domain/reasignacion.service.js).
-//
-// Acceso restringido a administradores — ver xs-security.json (scope
-// "Administrador").
-//
-// ── LA UNIDAD DE TRABAJO ES LA PROPUESTA ─────────────────────────────────────
+// No contiene anotaciones @UI (viven en app/ui5-reasignacion/annotations.cds)
+// ni lógica de negocio (vive en reasignacion-service.js / domain/reasignacion.service.js).
+// Acceso restringido a administradores (xs-security.json, scope "Administrador").
 //
 // La raíz de la UI es PropuestasEnCurso, no TareasEnCurso: el administrador
-// gestiona una propuesta, no una tarea suelta. Cada propuesta agrupa hasta tres
-// firmantes (Apoderado 1, Apoderado 2, Liberador Final) de los que, en un
-// instante dado, solo algunos tienen tarea viva en BPA.
-//
-// TareasEnCurso se conserva expuesta porque es la verdad de BPA a nivel tarea y
-// resulta útil para diagnosticar, pero ya no es el objetivo de la aplicación.
-// =============================================================================
+// gestiona una propuesta, que agrupa hasta tres firmantes (Apoderado 1,
+// Apoderado 2, Liberador Final) de los que solo algunos tienen tarea viva.
+// TareasEnCurso se conserva expuesta (verdad de BPA a nivel tarea) para diagnóstico.
 
 type AccionReasignacion {
     exito   : Boolean;
@@ -40,55 +24,51 @@ type AccionReasignacion {
 @requires: 'Administrador'
 service ReasignacionService @(path: '/nomina/reasignacion') {
 
-    // =========================================================================
-    // Entidad principal: PropuestasEnCurso
-    //
     // Una fila por propuesta con al menos una tarea viva. Se deriva agrupando
     // TareasEnCurso por la clave de negocio (sociedad + nº + fecha de pago) —
-    // ver _clavePropuesta en reasignacion-service.js. NO se agrupa por
-    // workflowInstanceId: apoderados y liberador corren en procesos BPA
-    // distintos y ese ID los separaría.
-    // =========================================================================
+    // ver _clavePropuesta en reasignacion-service.js. No se agrupa por
+    // workflowInstanceId: apoderados y liberador corren en procesos distintos.
     @readonly
     @cds.persistence.skip
     entity PropuestasEnCurso {
-        // Clave de negocio en formato seguro para URL: '0031~3127~2026-08-07'.
-        // El separador '~' no aparece en ninguno de los tres campos y no obliga
-        // a escapar nada en la ruta del Object Page.
-        key propuestaID      : String(60);
+        key propuestaID      : String(60);   // '0031~3127~2026-08-07' (seguro para URL)
 
-        // La misma clave en formato legible: '0031 · 3127 · 2026-08-07'.
-        grupoPropuesta       : String(80);
+        grupoPropuesta       : String(80);   // '0031 · 3127 · 2026-08-07' (legible)
 
         sociedad             : String(10);
         numeroPropuesta      : String(20);
+
+        // ISO (yyyy-MM-dd), parte de la clave de negocio; lo que se muestra es
+        // la versión dd/MM/yyyy en *Texto.
         fechaPropuestaPago   : String(10);
         fechaPago            : String(10);
+        fechaPPTexto         : String(10);
+        fechaPagoTexto       : String(10);
+
         tituloTarea          : String(255);
         banco                : String(50);
+        bancoDescripcion     : String(100);  // descripción del banco ("001 - BCP Soles")
 
-        // importe crudo (ordena numéricamente) + ya formateado (se muestra),
-        // misma convención que TareasEnCurso y que TareasInbox en PagosService.
-        importe              : String(30);
+        // "Grupo Pers." — texto de negocio de tipoTrabajador (E/P), traducido
+        // por config/grupos-personal.js.
+        grupoPersonal        : String(30);
+
+        importe              : String(30);   // crudo, para ordenar
         moneda               : String(5);
-        importeTexto         : String(30);
+        importeTexto         : String(30);   // formateado, para mostrar
 
-        // Punto del flujo en el que está la propuesta, derivado de qué roles
-        // tienen tarea viva: 'Pendiente de Apoderados' | 'Pendiente de Liberación'.
+        // Punto del flujo derivado de qué roles tienen tarea viva.
         estadoPropuesta      : String(60);
         estadoCriticidad     : Integer;      // UI.CriticalityType — ver config/estados.js
 
-        // Destinatarios de las tareas vivas, en una línea, para poder localizar
-        // una propuesta por la persona sin abrirla ni cruzar los firmantes.
+        // Destinatarios de las tareas vivas, en una línea.
         destinatarios        : String(300);
 
-        // Cuántas de las tareas de esta propuesta están vivas ahora mismo.
-        // OJO: ya no coincide con el número de personas pendientes — la tarea
-        // de apoderado es una sola con N destinatarios.
+        // Tareas vivas ahora mismo — no coincide con personas pendientes
+        // (la tarea de apoderado es una sola con N destinatarios).
         tareasPendientes     : Integer;
 
-        // Estado del quórum de apoderados, para no tener que contar filas de
-        // firmante: cuántas firmas hay, cuántas exige BPA y el texto compuesto.
+        // Estado del quórum de apoderados.
         contadorFirmas       : Integer;
         firmasRequeridas     : Integer;
         firmasTexto          : String(40);   // '1 de 2 firmas'
@@ -97,81 +77,52 @@ service ReasignacionService @(path: '/nomina/reasignacion') {
         firmantes            : Composition of many Firmante
                                  on firmantes.propuestaID = propuestaID;
 
-        // Las DOS agregaciones que necesita sap.suite.ui.commons.ProcessFlow,
-        // ya calculadas por CAP igual que en el Object Page de aprobaciones:
-        //   niveles     → lanes (columnas del diagrama)
-        //   aprobadores → nodes (tarjeta por firmante)
+        // Las dos agregaciones que necesita sap.suite.ui.commons.ProcessFlow,
+        // calculadas por CAP igual que en el Object Page de aprobaciones.
         niveles              : Composition of many NivelFlujo
                                  on niveles.propuestaID = propuestaID;
         aprobadores          : Composition of many NodoFlujo
                                  on aprobadores.propuestaID = propuestaID;
     };
 
-    // =========================================================================
-    // Composición: Firmante — una PERSONA del flujo de la propuesta
-    //
-    // Una fila por cada persona designada en el flujo —cada apoderado de la
-    // lista y cada liberador de la suya—, exista o no su tarea. Esa es la razón
-    // de `reasignable`: BPA crea la instancia de tarea cuando el token del flujo
-    // llega a ella, así que los liberadores de una propuesta que está en firma de
-    // apoderados TODAVÍA NO TIENEN TAREA que reasignar; y un apoderado que ya
-    // firmó tampoco, aunque la tarea siga viva para sus compañeros. Se muestran
-    // igualmente para que el administrador vea el flujo completo, con el botón
-    // inactivo y el porqué en motivoNoReasignable.
-    // =========================================================================
+    // Una fila por cada persona designada en el flujo (cada apoderado de la
+    // lista, cada liberador de la suya), exista o no su tarea. `reasignable`
+    // distingue esos casos: se muestran igual para dar visibilidad del flujo
+    // completo, con el botón inactivo y el porqué en motivoNoReasignable.
     @readonly
     @cds.persistence.skip
     entity Firmante {
         key propuestaID          : String(60);
 
-        // Clave de la fila. El rol dejó de servir como clave con el quórum:
-        // un mismo rol ('Apoderado') tiene ahora N personas a la vez, y el
-        // liberador también desde que Payroll puede designar varios. Es
-        // '<rol>#<correo>' —'apoderado#a@x.net', 'liberador#b@x.net'—, que es lo
-        // que permite a la acción saber A QUIÉN está sustituyendo. Solo la fila
-        // de un rol del que aún no se conoce a nadie lleva el rol a secas.
+        // '<rol>#<correo>' ('apoderado#a@x.net'): un rol de pool tiene N
+        // personas a la vez; identifica a quién sustituye la acción.
         key firmanteID           : String(150);
 
-        // Rol para mostrar — 'Apoderado' | 'Liberador Final'. Se repite en
-        // varias filas cuando el rol es un pool: es una etiqueta, no una clave.
-        rol                      : String(30);
+        rol                      : String(30);       // 'Apoderado' | 'Liberador Final'
+        nivel                    : Integer;          // orden en el flujo (2 = apoderados, 3 = liberación)
 
-        // Orden en el flujo (2 = apoderados, 3 = liberación).
-        // Ordena la tabla sin depender del alfabeto del rol.
-        nivel                    : Integer;
-
-        // La persona de esta fila: un miembro de la lista de su rol. Con tarea
-        // viva la lista son los recipientUsers de BPA —así se reflejan las
-        // reasignaciones ya hechas—; sin ella, la del contexto de la propuesta.
+        // Con tarea viva: recipientUsers de BPA. Sin ella: el contexto de la propuesta.
         usuario                  : String(100);
 
-        // 'Pendiente' | 'Reservada' | 'Firmado' | 'No iniciado'
-        estadoFirmante           : String(30);
+        estadoFirmante           : String(30);        // 'Pendiente' | 'Reservada' | 'Firmado' | 'No iniciado'
         estadoCriticidad         : Integer;
 
-        // Estado del quórum al que pertenece esta firma. En el liberador van a
-        // cero: su paso no tiene quórum —es una única liberación— por muchos
-        // destinatarios que tenga la tarea.
+        // Estado del quórum de esta firma; en el liberador van a cero (una única liberación).
         contadorFirmas           : Integer;
         firmasRequeridas         : Integer;
 
-        // Tarea BPA de este firmante. Vacío si aún no existe o ya se completó.
-        // En el pool, la MISMA tarea aparece en varias filas: es una sola tarea
-        // con varios destinatarios posibles.
+        // Tarea BPA de este firmante; vacío si no existe o ya se completó. En
+        // el pool, la misma tarea aparece en varias filas.
         instanceID               : String(255);
         estadoTarea              : String(20);   // READY | RESERVED
 
-        // Gobierna Core.OperationAvailable de la acción: true solo cuando esta
-        // persona concreta tiene todavía una firma que aportar.
+        // Gobierna Core.OperationAvailable: true solo si esta persona aún tiene firma que aportar.
         reasignable              : Boolean;
         motivoNoReasignable      : String(120);
     };
 
-    // =========================================================================
-    // Composición: NivelFlujo — lanes del ProcessFlow
-    // Mismo shape que NivelAprobacion en pagos-service.cds: lo consume el mismo
-    // fragmento y lo construye el mismo módulo (domain/historial.service.js).
-    // =========================================================================
+    // NivelFlujo — lanes del ProcessFlow. Mismo shape que NivelAprobacion en
+    // pagos-service.cds; lo construye domain/historial.service.js.
     @readonly
     @cds.persistence.skip
     entity NivelFlujo {
@@ -185,10 +136,7 @@ service ReasignacionService @(path: '/nomina/reasignacion') {
         resumen             : String(180);
     };
 
-    // =========================================================================
-    // Composición: NodoFlujo — nodes del ProcessFlow
-    // Mismo shape que Aprobador en pagos-service.cds.
-    // =========================================================================
+    // NodoFlujo — nodes del ProcessFlow. Mismo shape que Aprobador en pagos-service.cds.
     @readonly
     @cds.persistence.skip
     entity NodoFlujo {
@@ -215,118 +163,71 @@ service ReasignacionService @(path: '/nomina/reasignacion') {
         esActual            : Boolean;
     };
 
-    // =========================================================================
-    // TareasEnCurso — verdad de BPA a nivel tarea
-    // Ya no es la raíz de la UI (lo es PropuestasEnCurso); se conserva expuesta
-    // porque es de donde se derivan las propuestas y sirve para diagnosticar.
-    // Clave: instanceID = campo "id" de la API de tasks de BPA Workflow.
-    // =========================================================================
+    // Verdad de BPA a nivel tarea. Ya no es la raíz de la UI (lo es
+    // PropuestasEnCurso); se conserva expuesta porque de ahí se derivan las
+    // propuestas y sirve para diagnóstico. Clave: instanceID (id de BPA).
     @readonly
     @cds.persistence.skip
     entity TareasEnCurso {
-        // Clave única de la tarea BPA
         key instanceID          : String(255);
 
         tituloTarea              : String(255);
         numeroPropuesta          : String(20);
         sociedad                 : String(10);
         banco                    : String(50);
+        bancoDescripcion         : String(100);
+        grupoPersonal            : String(30);
 
-        // importe: valor crudo del contexto BPA ("2290435.83"). Se conserva
-        // porque es el que permite ordenar y filtrar numéricamente la columna.
-        importe                  : String(30);
+        importe                  : String(30);   // crudo, para ordenar/filtrar
         moneda                   : String(5);
-
-        // importeTexto: el mismo importe ya formateado por CAP con la moneda de
-        // la propuesta ("S/ 2,290,435.83" / "US$ 1,500.00"). Es lo que muestra
-        // la tabla — misma convención que TareasInbox en PagosService.
-        importeTexto             : String(30);
+        importeTexto             : String(30);   // formateado ("S/ 2,290,435.83")
 
         fechaPropuestaPago       : String(10);
 
-        // Rol de la tarea — "Apoderado" | "Liberador Final"
-        rolTarea                 : String(30);
+        rolTarea                 : String(30);   // "Apoderado" | "Liberador Final"
 
-        // Primer destinatario de la tarea. Se conserva porque la ayuda de
-        // búsqueda y el filtro de esta lista siguen siendo por persona, pero
-        // con el pool de apoderados NO es el dato completo: para eso está
-        // `destinatarios`.
+        // Primer destinatario; con el pool de apoderados no es el dato
+        // completo (para eso está `destinatarios`).
         usuarioActual            : String(100);
 
-        // Todos los destinatarios de la tarea (recipientUsers en BPA), en una
-        // línea. Con el pool de apoderados son varios a la vez.
+        // Todos los destinatarios de la tarea (recipientUsers en BPA), en una línea.
         destinatarios            : String(1000);
 
-        // estadoTarea: status crudo de BPA — READY | RESERVED. Se conserva en
-        // el modelo pero ya no se expone en la UI: por sí solo no dice nada
-        // sobre el flujo de aprobación (ver estadoNivel).
-        estadoTarea              : String(20);
+        estadoTarea              : String(20);    // status crudo de BPA — READY | RESERVED
 
-        // estadoNivel: el status traducido a negocio y con el nivel de
-        // aprobación en el que está la tarea — "Pendiente - Apoderado 1",
-        // "Reservada - Liberador Final". Es lo que muestra la columna Estado
-        // y lo que se usa para filtrar, en vez del status crudo de BPA.
+        // Status traducido a negocio + nivel de aprobación, ej. "Pendiente -
+        // Apoderado 1". Lo que muestra y filtra la columna Estado.
         estadoNivel              : String(60);
 
-        // Color de estadoNivel — UI.CriticalityType: 0=Neutral 1=Negative
-        // 2=Critical 3=Positive 5=Information. Se deriva del rol de la tarea
-        // (ver CRITICIDAD_POR_ROL en reasignacion-service.js).
+        // UI.CriticalityType, derivado del rol de la tarea (ver
+        // CRITICIDAD_POR_ROL en reasignacion-service.js).
         estadoCriticidad         : Integer;
 
-        // ID del proceso padre en BPA.
-        //
-        // NO sirve para agrupar el flujo: los apoderados corren en el subproceso
-        // de Apoderados y el liberador en el proceso raíz (ver contextPath en
-        // config/perfiles.js), así que sus instancias no tienen por qué
-        // coincidir. Para agrupar está grupoPropuesta.
+        // ID del proceso padre en BPA. No agrupa el flujo (apoderados y
+        // liberador corren en procesos distintos); para eso está grupoPropuesta.
         workflowInstanceId       : String(255);
 
         // Clave de negocio de la propuesta — "0031 · 3127 · 2026-08-07".
-        // Es lo que agrupa la lista: identifica el flujo de punta a punta,
-        // independientemente de en qué proceso BPA viva cada tarea.
         // Ver _clavePropuesta en reasignacion-service.js.
         grupoPropuesta           : String(80);
 
-        // Los firmantes de la propuesta según el contexto BPA, en una línea.
-        // Se muestran para dar visibilidad del flujo completo: NO son
-        // reasignables mientras su tarea no exista en BPA.
-        //
-        // usuarioApoderado1 / usuarioApoderado2 desaparecieron con el quórum:
-        // siguen en el DataType de BPA por compatibilidad pero quedaron fuera
-        // del flujo, y mapearlos aquí habría mostrado a dos personas fijas que
-        // ya no son necesariamente las que tienen la tarea.
+        // Firmantes de la propuesta según el contexto BPA, para visibilidad
+        // del flujo completo (no reasignables mientras su tarea no exista).
         usuariosApoderados       : String(1000);   // lista completa
         apoderadosFirmantes      : String(1000);   // los que ya firmaron
         apoderadosPendientes     : String(1000);   // los que aún pueden firmar
         usuarioLiberador         : String(1000);   // uno o varios liberadores
 
-        // Estado del quórum de la propuesta a la que pertenece esta tarea.
         contadorFirmas           : Integer;
         firmasRequeridas         : Integer;
         firmasTexto              : String(40);     // '1 de 2 firmas'
     };
 
-    // =========================================================================
-    // Entidades de ayuda de búsqueda (value help) de la barra de filtros
-    //
-    // POR QUÉ EXISTEN
-    // ---------------
-    // Los cuatro filtros de esta app son campos de texto contra un origen que
-    // no es una tabla. Sin @Common.ValueList, Fiori Elements solo ofrece el
-    // diálogo de "definir condiciones": el administrador tiene que escribir de
-    // memoria el código de sociedad o el correo exacto del destinatario, y un
-    // dedazo se traduce en una lista vacía sin explicación.
-    //
-    // Sociedades, Usuarios y Estados son DINÁMICAS: ofrecen los valores que
-    // realmente existen ahora mismo entre las tareas en curso, no un catálogo
-    // maestro — Estados en particular, porque es un cruce de status BPA × rol
-    // (hasta 3 roles activos × 2 status = 6 combinaciones), y solo tiene
-    // sentido ofrecer las que hoy tienen alguna tarea detrás.
-    // Roles es DOMINIO CERRADO: sale de config/perfiles.js, no de los datos.
-    //
-    // Todas son @cds.persistence.skip — se resuelven en reasignacion-service.js
-    // sobre el mismo snapshot de tareas que alimenta TareasEnCurso.
-    // =========================================================================
+    // Entidades de value help para la barra de filtros: sin @Common.ValueList,
+    // Fiori Elements solo ofrece el diálogo de "definir condiciones". Sociedades,
+    // Usuarios y Estados son dinámicas (valores presentes en las tareas en
+    // curso); Roles es dominio cerrado (config/perfiles.js). Todas se resuelven
+    // en reasignacion-service.js sobre el mismo snapshot que TareasEnCurso.
 
     @readonly
     @cds.persistence.skip
@@ -349,32 +250,18 @@ service ReasignacionService @(path: '/nomina/reasignacion') {
     @readonly
     @cds.persistence.skip
     entity Estados {
-        // Estados de PROPUESTA — 'Pendiente de Apoderados' | 'Pendiente de
-        // Liberación'. Es la clave y el texto a la vez: no hay un código corto
-        // detrás que valga la pena mostrar por separado.
-        //
-        // Ojo: no son los estados de TAREA de TareasEnCurso.estadoNivel
-        // ("Pendiente - Apoderado 1"), que son un cruce status × rol. Lo que se
-        // filtra en esta pantalla es el punto del flujo de la propuesta.
+        // Estados de PROPUESTA ('Pendiente de Apoderados' | 'Pendiente de
+        // Liberación'), no los de TAREA de TareasEnCurso.estadoNivel.
         key estadoPropuesta : String(60);
     };
 
-    // =========================================================================
-    // Acción bound de Firmante
-    //
     // Va en Firmante y no en TareasEnCurso porque el administrador razona por
-    // persona dentro de una propuesta, no por identificador de tarea. El
-    // handler resuelve el instanceID del firmante y rechaza de entrada los que
-    // no tienen firma pendiente (ver domain/reasignacion.service.js).
-    // =========================================================================
+    // persona dentro de una propuesta, no por identificador de tarea.
     extend entity Firmante with actions {
 
-        // Sustituye a la persona de esta fila por otra en los destinatarios de
-        // su tarea BPA.
-        //
-        // En el pool de apoderados NO reemplaza la lista entera: se envía la
-        // lista de destinatarios completa con este correo sustituido, de modo
-        // que los demás apoderados pendientes conservan su tarea.
+        // Sustituye a la persona de esta fila por otra en los destinatarios
+        // de su tarea BPA. En el pool no reemplaza la lista entera: envía la
+        // lista completa con este correo sustituido.
         action reasignar(nuevoUsuario: String) returns AccionReasignacion;
     };
 }

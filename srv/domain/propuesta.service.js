@@ -1,20 +1,10 @@
 "use strict";
 /**
- * domain/propuesta.service.js
+ * Lógica de dominio de la Propuesta de Pago. No contiene llamadas HTTP
+ * directas; delega en los clientes de infraestructura.
  *
- * Lógica de dominio de la Propuesta de Pago.
- * No contiene llamadas HTTP directas; delega en los clientes de infraestructura.
- *
- * Cubre:
- *   - Lectura y contingencia de creación de propuesta
- *   - Actualización de estado en HANA
- *   - Validación de documentos adjuntos y adelantos
- *   - Construcción de la clave HANA (createKey)
- *
- * Clasificación por lógica de negocio:
- *   LECTURA      → getPropuestaPago, getPPAdjuntos, getInfoPropuestaSAP, getPDFSAP
- *   ESCRITURA    → updatePropuestaPago, createPropuestaPago (contingencia)
- *   VALIDACIÓN   → checkAdelanto, evaluarDocumentoAdjunto
+ * Cubre lectura y contingencia de creación de propuesta, actualización de
+ * estado en HANA, y validación de documentos adjuntos y adelantos.
  */
 
 const cds  = require("@sap/cds");
@@ -25,10 +15,6 @@ const LOG  = cds.log("propuesta.service");
 /**
  * Obtiene la propuesta de pago desde HANA con sus expansiones.
  * Si no existe (404) la crea en HANA como contingencia desde el contexto BPA.
- *
- * Equivale al bloque principal de _onBindingChange() en Detail.controller.js:
- *   oPropuestaPago = await this.oPPOData.getPropuestaPago(...)
- *     .catch(async err => { if (err.statusCode === "404") → ejecutarCreate })
  *
  * @param {object} contexto - objeto contexto.json leído desde BPA
  * @param {string} taskId   - InstanceID del BPA (para IdInstanciaWF)
@@ -68,10 +54,7 @@ async function obtenerOCrearPropuesta(contexto, taskId) {
   return creada ?? oPropuestaSCP;
 }
 
-/**
- * Construye la clave HANA de una propuesta.
- * Equivale a: oHanaModel.createKey("/PropuestaPago", { NroPP, Sociedad, FechaPP })
- */
+/** Construye la clave HANA de una propuesta. */
 function buildHanaPath(pp) {
   return `/PropuestaPago(NroPP='${pp.NroPP}',Sociedad='${pp.Sociedad}',FechaPP='${pp.FechaPP}')`;
 }
@@ -91,15 +74,11 @@ async function getPDFSAP(pp) {
 // ─── ESCRITURA ────────────────────────────────────────────────────────────────
 
 /**
- * Actualiza EstadoPP + auditoría en HANA XSOData.
- * DEBE llamarse ANTES de completarTareaWF en todo handler de aprobación.
+ * Sella el estado de la propuesta (estadoPP, ya definido por el handler de rol)
+ * previo a BPA. El estado y sus flags viven en el contexto BPA; no hay
+ * persistencia local.
  */
 async function actualizarEstado(propuesta, usuario) {
-  // Arquitectura BTP: no hay HANA. El estado de la propuesta (estadoPP) y sus
-  // flags viven en el contexto BPA y se persisten cuando bpa-client completa o
-  // inicia la tarea. El nuevo estadoPP ya viene seteado por el handler de rol;
-  // esta función queda como punto único de "sellado" previo a BPA (sin persistir
-  // en ninguna base local).
   LOG.info(`actualizarEstado | numeroPropuesta=${propuesta.numeroPropuesta} | estadoPP=${propuesta.estadoPP} | usuario=${usuario?.name ?? usuario}`);
   return propuesta;
 }
@@ -108,17 +87,13 @@ async function actualizarEstado(propuesta, usuario) {
 
 /**
  * Verifica si hay adelanto y si existe el adjunto requerido.
- * Retorna null si todo está OK, o un mensaje de error si debe bloquearse.
- *
- * Equivale a la lógica de AnalistaTesorería antes de enviarSupervisorOCaja.
+ * @returns {string|null} null si está OK, o un mensaje de error si debe bloquearse.
  */
 async function validarAdelanto(propuesta) {
-  // El indicador de adelanto viaja en el contexto (PropuestaNomina.indicadorPagoAdelanto).
-  if (propuesta.indicadorPagoAdelanto !== "X") return null; // sin adelanto, OK
+  if (propuesta.indicadorPagoAdelanto !== "X") return null;
 
-  // TODO(arquitecto): la verificación del adjunto de sustento debe resolverse vía
-  // CPI (cpi.getAdjuntos) cuando el iFlow exponga el tipo de documento. Por ahora
-  // se valida solo el indicador del contexto para no bloquear el flujo de pruebas.
+  // TODO: verificar el adjunto de sustento vía CPI (cpi.getAdjuntos) cuando el
+  // iFlow exponga el tipo de documento.
   return null;
 }
 

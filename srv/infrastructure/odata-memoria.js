@@ -1,59 +1,18 @@
 "use strict";
 /**
- * srv/infrastructure/odata-memoria.js
- *
  * Aplica en memoria la parte "de consulta" de una petición OData ($filter,
  * $search, $orderby, $top/$skip, $count) sobre un array ya construido.
  *
- * POR QUÉ EXISTE
- * --------------
- * TareasInbox y TareasEnCurso son @cds.persistence.skip: no hay tabla detrás,
- * los datos los arma un handler `.on("READ", ...)` a partir de BPA. Cuando un
- * handler `.on` devuelve un array, CAP lo entrega TAL CUAL al cliente: no le
- * aplica el where, el orderBy ni el limit de la consulta, porque el `.on`
- * REEMPLAZA por completo la implementación por defecto (la que, con una entidad
- * persistida, traduciría el CQN a SQL).
+ * Necesario para entidades @cds.persistence.skip (TareasInbox, TareasEnCurso):
+ * un handler `.on("READ", ...)` que devuelve un array reemplaza la
+ * implementación por defecto, así que CAP no le aplica where/orderBy/limit.
  *
- * Resultado antes de este módulo: la barra de filtros de Fiori Elements enviaba
- * su $filter, el servidor lo ignoraba y devolvía la lista entera. Lo mismo con
- * el campo de búsqueda, el ordenamiento por columna y la paginación.
- *
- * BPA no expone un endpoint para filtrar tareas por estos campos de negocio
- * (viven en el contexto de cada tarea, no en la lista de task-instances), así
- * que el filtrado tiene que ocurrir después de traer y enriquecer las tareas.
- * De ahí que sea en memoria y no delegado al origen.
- *
- * QUÉ SE INTERPRETA
- * -----------------
- * El CQN que CAP construye desde la URL OData, es decir req.query.SELECT:
- *
- *   where   : [{ref:['sociedad']}, '=', {val:'0025'}, 'and', {xpr:[...]}]
- *   search  : [{val:'R4615'}]
- *   orderBy : [{ref:['importe'], sort:'desc'}]
- *   limit   : {rows:{val:20}, offset:{val:40}}
- *
- * Cubre lo que la barra de filtros y la tabla del List Report generan:
- * comparaciones (= != < <= > >=), and/or/not con paréntesis (xpr), in, between,
- * is null, like y las funciones contains/startswith/endswith más las escalares
- * de texto habituales.
- *
- * DECISIONES DELIBERADAS
- * ----------------------
- * - El orderBy `implicit` NO se aplica. Fiori Elements añade siempre un
- *   `orderBy: [{ref:['instanceID'], implicit:true}]` para estabilizar su
- *   paginación. Obedecerlo ordenaría el inbox por el GUID de la tarea y
- *   destruiría el orden en que BPA entrega las tareas (el más reciente
- *   primero), que es el orden que el usuario espera ver por defecto. Solo se
- *   aplica el ordenamiento que el usuario pide explícitamente en una columna.
- *
- * - Las coincidencias de TEXTO PARCIAL (contains/startswith/endswith/like) y la
- *   búsqueda libre son case-insensitive, igual que se comportarían contra
- *   SQLite o HANA. La igualdad (`eq`) sí distingue mayúsculas, como manda OData.
- *
- * - Si evaluar el filtro falla, la fila SE CONSERVA y se registra un warning.
- *   En un inbox de aprobaciones ocultar tareas por un fallo del evaluador es
- *   peor que mostrar alguna de más: el usuario ve el dato y el log delata el
- *   problema, en vez de una pantalla vacía sin explicación.
+ * El orderBy `implicit` que añade Fiori Elements para estabilizar su
+ * paginación no se aplica: solo se ordena por lo que el usuario pide en una
+ * columna. Las coincidencias de texto parcial (contains/startswith/endswith/
+ * like) y la búsqueda libre son case-insensitive; `eq` distingue mayúsculas.
+ * Si evaluar un filtro falla, la fila se conserva (fail-open) y se registra
+ * un warning.
  */
 
 const cds = require("@sap/cds");
@@ -71,10 +30,8 @@ const OPERADORES = new Set([
 
 /**
  * Aplica $filter, $search, $orderby y $top/$skip de la petición sobre las filas.
- *
- * Devuelve un array NUEVO con la propiedad `$count` fijada al total tras filtrar
- * y buscar pero ANTES de paginar — que es exactamente lo que OData espera en
- * `@odata.count` y lo que la tabla usa para su scroll.
+ * Devuelve un array nuevo con `$count` fijado al total tras filtrar/buscar
+ * pero antes de paginar.
  *
  * @param {object[]} filas - resultado ya construido por el handler
  * @param {object}   req   - request de CAP (se lee req.query.SELECT)
@@ -95,7 +52,6 @@ function aplicarConsulta(filas, req) {
 
   resultado = _ordenar(resultado, select.orderBy);
 
-  // Total ANTES de paginar: es el que responde "cuántas tareas hay en total".
   const total = resultado.length;
   resultado = _paginar(resultado, select.limit);
 
@@ -123,9 +79,7 @@ function _cumpleFiltro(where, fila) {
 /**
  * Recorre los tokens del where respetando la precedencia de OData:
  * `or` (más baja) → `and` → unidad (comparación, función o subexpresión).
- *
- * Los tokens son la lista plana que CAP produce; los paréntesis llegan como un
- * nodo `{xpr: [...]}` que se evalúa recursivamente con otro _Evaluador.
+ * Los paréntesis llegan como `{xpr: [...]}` y se evalúan recursivamente.
  */
 class _Evaluador {
   constructor(tokens, fila) {
@@ -152,8 +106,6 @@ class _Evaluador {
     let valor = this._and();
     while (this._esPalabra("or")) {
       this.pos++;
-      // El derecho se evalúa siempre (no hay corto-circuito) porque hay que
-      // consumir sus tokens para seguir leyendo la expresión.
       const derecho = this._and();
       valor = valor || derecho;
     }
@@ -178,7 +130,6 @@ class _Evaluador {
 
     const token = this._actual();
 
-    // Paréntesis: (a eq 1 or a eq 2)
     if (token && Array.isArray(token.xpr)) {
       this.pos++;
       return new _Evaluador(token.xpr, this.fila).evaluar();
@@ -192,8 +143,7 @@ class _Evaluador {
       return this._comparar(izquierdo, operador.toLowerCase());
     }
 
-    // Sin operador detrás: es un predicado por sí mismo — contains(...) o un
-    // flag booleano usado directamente como condición.
+    // Sin operador detrás: predicado por sí mismo (contains(...), flag booleano).
     return izquierdo === true;
   }
 
@@ -235,7 +185,6 @@ class _Evaluador {
       case "<>":   return !_iguales(izquierdo, derecho);
       case "like": return _coincidePatron(izquierdo, derecho);
       default: {
-        // <, <=, >, >= — con null en cualquier lado no hay orden definido.
         const orden = _comparar(izquierdo, derecho);
         if (Number.isNaN(orden)) return false;
         if (operador === "<")  return orden <  0;
@@ -254,8 +203,6 @@ function _resolver(token, fila) {
 
   if ("val" in token) return token.val;
 
-  // ref: nombre de campo. Se toma el último segmento porque estas entidades son
-  // planas — no hay navegación dentro del filtro.
   if (Array.isArray(token.ref)) {
     const campo = token.ref[token.ref.length - 1];
     return fila?.[campo] ?? null;
@@ -275,13 +222,11 @@ function _funcion(token, fila) {
   const [a, b, c] = args;
 
   switch (nombre) {
-    // Predicados — comparan en minúsculas, igual que LIKE en SQLite/HANA.
     case "contains":       return _texto(a).toLowerCase().includes(_texto(b).toLowerCase());
     case "startswith":     return _texto(a).toLowerCase().startsWith(_texto(b).toLowerCase());
     case "endswith":       return _texto(a).toLowerCase().endsWith(_texto(b).toLowerCase());
     case "matchespattern": return new RegExp(_texto(b)).test(_texto(a));
 
-    // Escalares de texto
     case "tolower":   return _texto(a).toLowerCase();
     case "toupper":   return _texto(a).toUpperCase();
     case "trim":      return _texto(a).trim();
@@ -310,15 +255,12 @@ function _coincidePatron(valor, patron) {
 // BÚSQUEDA ($search)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/**
- * Extrae los términos del nodo `search` del CQN, que según la expresión puede
- * llegar como lista plana de {val} o como un xpr con and/or entre términos.
- */
+/** Extrae los términos del nodo `search` del CQN (lista plana o xpr con and/or). */
 function _terminosBusqueda(search) {
   const terminos = [];
 
   const recorrer = (nodo) => {
-    if (!nodo || typeof nodo === "string") return;   // 'and' / 'or' no son términos
+    if (!nodo || typeof nodo === "string") return;
     if (Array.isArray(nodo)) return nodo.forEach(recorrer);
     if (nodo.val !== null && nodo.val !== undefined) terminos.push(String(nodo.val));
     if (nodo.xpr)  recorrer(nodo.xpr);
@@ -329,10 +271,7 @@ function _terminosBusqueda(search) {
   return terminos.filter(termino => termino.trim() !== "");
 }
 
-/**
- * Una fila coincide si TODOS los términos aparecen en alguno de sus campos de
- * texto o número — el AND es el comportamiento por defecto de $search en OData.
- */
+/** Una fila coincide si todos los términos aparecen en alguno de sus campos (AND). */
 function _coincideBusqueda(fila, terminos) {
   const contenido = Object.values(fila ?? {})
     .filter(valor => typeof valor === "string" || typeof valor === "number")
@@ -346,10 +285,7 @@ function _coincideBusqueda(fila, terminos) {
 // ORDEN Y PAGINACIÓN ($orderby, $top/$skip)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/**
- * Ordena por los criterios que el usuario pidió explícitamente.
- * Los `implicit` de Fiori Elements se descartan (ver cabecera del módulo).
- */
+/** Ordena por los criterios explícitos del usuario; descarta los `implicit`. */
 function _ordenar(filas, orderBy) {
   const criterios = (orderBy ?? []).filter(c => !c.implicit && Array.isArray(c.ref));
   if (!criterios.length) return filas;
@@ -359,7 +295,6 @@ function _ordenar(filas, orderBy) {
       const campo = criterio.ref[criterio.ref.length - 1];
       const orden = _comparar(filaA?.[campo], filaB?.[campo]);
       if (!orden || Number.isNaN(orden)) {
-        // NaN = alguno es null: se empuja al final, sin invertir por 'desc'.
         if (Number.isNaN(orden)) {
           const nuloA = filaA?.[campo] === null || filaA?.[campo] === undefined;
           const nuloB = filaB?.[campo] === null || filaB?.[campo] === undefined;
@@ -397,11 +332,7 @@ function _esNumerico(valor) {
          (typeof valor === "string" && valor.trim() !== "" && Number.isFinite(Number(valor)));
 }
 
-/**
- * Igualdad de `eq`. Deliberadamente NO normaliza dos textos a número: sociedad
- * '0025' no debe considerarse igual a '25'. La conversión numérica se reserva
- * para cuando uno de los lados ya viene como número desde la URL.
- */
+/** Igualdad de `eq`. No normaliza texto a número: '0025' no es igual a '25'. */
 function _iguales(a, b) {
   if (a === b) return true;
   const nuloA = a === null || a === undefined;
@@ -413,8 +344,7 @@ function _iguales(a, b) {
 
 /**
  * Orden relativo de dos valores: -1 | 0 | 1, o NaN si alguno es null.
- * Compara numéricamente cuando ambos lados son números o texto numérico
- * (para que "8500.00" < "43038.69" en la columna Importe).
+ * Compara numéricamente cuando ambos lados son números o texto numérico.
  */
 function _comparar(a, b) {
   if (a === null || a === undefined || b === null || b === undefined) return NaN;

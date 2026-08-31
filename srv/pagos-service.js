@@ -1,7 +1,5 @@
 "use strict";
 /**
- * srv/pagos-service.js
- *
  * Implementación del PagosService usando el patrón cds.ApplicationService.
  *
  * Grupos de handlers registrados automáticamente por init():
@@ -12,10 +10,10 @@
  *   handle_aprobaciones()   → todas las acciones bound de TareasInbox
  *                             (delegadas a aprobacion.service.registrarHandlers)
  *
- * Roles activos (BPA v1.2.0 — H2H Nomina 1.5.0):
+ * Roles activos:
  *   Apoderado (pool, quórum de 2) → apoderadoAprobar | apoderadoRechazar
  *   Liberador                     → liberadorLiberar | liberadorRechazar | liberadorAnular
- *   Coordinador                   → ANULADO — retorna 501 si se invoca
+ *   Coordinador                   → no activo — retorna 501 si se invoca
  */
 
 const cds      = require("@sap/cds");
@@ -28,6 +26,7 @@ const odata    = require("./infrastructure/odata-memoria");
 const { memoPorPeticion } = require("./infrastructure/memo-peticion");
 const perfiles = require("./config/perfiles");
 const estados  = require("./config/estados");
+const { grupoPersonal } = require("./config/grupos-personal");
 const { Readable } = require("stream");
 
 const LOG = cds.log("PagosService");
@@ -60,7 +59,6 @@ class PagosService extends cds.ApplicationService {
     /**
      * GET /nomina/aprobaciones/obtenerConstantes()
      * Carga constantes de negocio desde el servicio de constantes.
-     * Origen legado: onInit() del Master.controller.js
      */
     this.on("obtenerConstantes", async (_req) => {
       const { rpta } = await constSvc.getConstantes();
@@ -81,36 +79,15 @@ class PagosService extends cds.ApplicationService {
   static handle_pdf() {
     /**
      * GET /nomina/aprobaciones/PropuestaPDF('{id}')/contenido
-     * Sirve el PDF de la propuesta como stream binario — es la URL que consume
-     * sap.m.PDFViewer desde el botón "Ver PDF" del Object Page
-     * (app/ui5-aprobaciones/webapp/ext/util/VisorPDF.js).
+     * Sirve el PDF de la propuesta como stream binario — la URL que consume
+     * sap.m.PDFViewer desde el botón "Ver PDF" del Object Page.
      *
      * La clave `id` es la terna '<numeroPropuesta>-<sociedad>-<yyyy-MM-dd>' que
      * arma _urlPDF(): la fecha aporta sus propios guiones, por eso se reconstruye
      * uniendo todo lo que sigue a los dos primeros segmentos.
      *
-     * ⚠ ORIGEN REAL PENDIENTE: se sirve un documento preliminar hasta que el
-     * iFlow que lo entrega esté disponible. El visor ya funciona de punta a
-     * punta contra este handler, así que conectar el origen real es cambiar
-     * únicamente lo que devuelve el bloque `esContenido` de abajo.
-     *
-     * POR DÓNDE ENTRA EL PDF DEFINITIVO
-     * ---------------------------------
-     * Por CPI, como TODO lo que este servicio necesita de SAP: el historial de
-     * aprobaciones, los proveedores, los adjuntos y el registro de firmas ya van
-     * por ahí (infrastructure/cpi-client.js, destination Cloud_Integration ya
-     * bindeada). El documento lo produce SAP y CPI lo expone; CAP no habla con
-     * SAP por ningún otro canal. Falta únicamente la ruta del iFlow y el formato
-     * de su respuesta para añadir el método al cliente de CPI.
-     *
-     * Lo que hay en el proyecto de la app UI5 anterior NO sirve:
-     * domain/propuesta.service.js → getPDFSAP() y utils.js →
-     * obtenerPDFPropuesta() invocan ambos un cliente `gw` que no existe en
-     * ningún módulo, así que revientan con ReferenceError si se los llama.
-     *
-     * Mientras tanto se sirve un PDF de una página con la terna impresa y
-     * marcado como preliminar: valida el flujo completo sin fingir en ningún
-     * momento que el documento es el de SAP.
+     * PENDIENTE: el documento real lo entregará un iFlow de CPI. Mientras tanto
+     * se sirve un PDF preliminar con la terna impresa y marcado como tal.
      */
     this.on("READ", "PropuestaPDF", async (req) => {
       const id = req.params?.[0]?.id ?? req.params?.[0];
@@ -124,14 +101,12 @@ class PagosService extends cds.ApplicationService {
       const esContenido = columns.some(c => c?.ref?.[0] === "contenido");
 
       if (esContenido) {
-        // Readable.from(buffer) NO sirve: un Buffer es iterable de NÚMEROS, así
-        // que el stream emitiría bytes sueltos en object mode y el request
-        // fallaría. Envolverlo en un array lo entrega como un único chunk.
+        // Envuelto en array: Readable.from(buffer) a secas itera bytes sueltos
+        // (object mode) en vez de entregar un único chunk.
         const contenido = _construirPDFPreliminar({ id, numeroPropuesta, sociedad, fechaPropuestaPago });
 
-        // Content-Type y Content-Disposition inline: sin ellos el navegador
-        // descarga el archivo en vez de pintarlo, y el iframe del PDFViewer
-        // queda en blanco. Ver capire → Serving Media Data.
+        // Sin Content-Disposition inline el navegador descarga el archivo en
+        // vez de pintarlo y el iframe del PDFViewer queda en blanco.
         return {
           value                            : Readable.from([contenido]),
           $mediaContentType                : "application/pdf",
@@ -158,25 +133,16 @@ class PagosService extends cds.ApplicationService {
      * GET /nomina/aprobaciones/TareasInbox
      * Sin clave → List Report: lista liviana desde BPA.
      * Con clave → Object Page: detalle completo con composiciones y flags de rol.
-     * Origen legado: Master.controller.js + Detail.controller.js → _onBindingChange
      */
     this.on("READ", "TareasInbox", async (req) => {
       const instanceID = req.params?.[0]?.instanceID ?? req.params?.[0];
 
-      // Sin clave → List Report
       if (!instanceID) {
-        // Normalizado antes de llegar a BPA: getInboxTasks lo envía como
-        // recipientUsers, que es un parámetro SEPARADO POR COMAS. Un id con una
-        // coma arrastrada ("arodas@centria.net,") añade un destinatario vacío y
-        // BPA deja de filtrar: la bandeja pasa a mostrar tareas de todo el
-        // mundo. Ver perfiles.normalizarUsuario.
+        // normalizarUsuario evita que un id con coma arrastrada rompa el
+        // filtro recipientUsers de BPA (ver perfiles.normalizarUsuario).
         const tareas = await _obtenerTareasBpa(perfiles.normalizarUsuario(req.user.id));
-        // BPA no sabe filtrar por sociedad/banco/fecha (viven en el contexto de
-        // cada tarea, no en la lista de task-instances), así que el $filter, el
-        // $search, el orden y la paginación se aplican aquí sobre la lista ya
-        // enriquecida. Sin esto la barra de filtros no tiene ningún efecto:
-        // un handler .on reemplaza la implementación por defecto de CAP y el
-        // array se devuelve tal cual. Ver infrastructure/odata-memoria.js.
+        // BPA no filtra por sociedad/banco/fecha; $filter/$search/orden/
+        // paginación se aplican aquí (ver infrastructure/odata-memoria.js).
         return odata.aplicarConsulta(tareas, req);
       }
 
@@ -189,7 +155,7 @@ class PagosService extends cds.ApplicationService {
                           nombres.some(nombre => camposCPI.includes(nombre));
 
       if (!necesitaCPI) {
-        // FCL pidió solo campos livianos — omitir CPI
+        // $select liviano (solo flags de rol, por ejemplo) — se omite CPI
         LOG.info(`[READ TareasInbox] $select liviano — omitiendo CPI | id=${instanceID}`);
         try {
           const [tarea, contexto] = await Promise.all([
@@ -198,12 +164,6 @@ class PagosService extends cds.ApplicationService {
           ]);
           if (contexto) return _mapearContextoBpa(instanceID, contexto, tarea?.activityId, tarea?.subject);
         } catch (error) {
-          // Mismo fallback que _obtenerTareasBpa y _obtenerDetalleTarea: sin él,
-          // esta rama devolvía 500 en cuanto BPA no estaba disponible. Fiori
-          // Elements la usa para los $select pequeños que resuelven la visibilidad
-          // de los botones (esApoderado/esLiberador), así que ese 500 rompía el
-          // enlace del Object Page entero — y con él las secciones que cuelgan de
-          // su contexto, incluido el ProcessFlow del historial.
           LOG.warn(`[READ TareasInbox] BPA no disponible en $select liviano — usando mock | ${error.message}`);
         }
         return _getMockDetalle(instanceID);
@@ -218,12 +178,8 @@ class PagosService extends cds.ApplicationService {
   static handle_estados() {
     /**
      * GET /nomina/aprobaciones/EstadosPropuesta
-     * Alimenta el desplegable del filtro "Estado" del List Report.
-     *
-     * Sale de la MISMA tabla que calcula el estado de cada tarea
-     * (config/estados.js), así que el texto ofrecido en el desplegable es
-     * exactamente el que llevan las filas — que es lo que exige el $filter,
-     * porque compara sobre el texto y no sobre un código.
+     * Alimenta el desplegable del filtro "Estado" del List Report, desde la
+     * misma tabla que calcula el estado de cada tarea (config/estados.js).
      */
     this.on("READ", "EstadosPropuesta", (req) =>
       odata.aplicarConsulta(estados.listar(), req));
@@ -232,10 +188,7 @@ class PagosService extends cds.ApplicationService {
   // ─── COMPOSICIONES ────────────────────────────────────────────────────────
 
   static handle_composiciones() {
-    /**
-     * GET /nomina/aprobaciones/TareasInbox('{id}')/proveedores
-     * Origen legado: fragment/Proveedores.xml
-     */
+    /** GET /nomina/aprobaciones/TareasInbox('{id}')/proveedores */
     this.on("READ", "Proveedor", async (req) => {
       const instanceID = _extraerInstanceID(req);
       if (!instanceID) return [];
@@ -243,10 +196,7 @@ class PagosService extends cds.ApplicationService {
       return detalle.proveedores ?? [];
     });
 
-    /**
-     * GET /nomina/aprobaciones/TareasInbox('{id}')/adjuntos
-     * Origen legado: fragment/Adjuntos2.xml
-     */
+    /** GET /nomina/aprobaciones/TareasInbox('{id}')/adjuntos */
     this.on("READ", "Adjunto", async (req) => {
       const instanceID = _extraerInstanceID(req);
       if (!instanceID) return [];
@@ -257,7 +207,6 @@ class PagosService extends cds.ApplicationService {
     /**
      * GET /nomina/aprobaciones/TareasInbox('{id}')/aprobadores
      * Nodos del ProcessFlow "Historial de Aprobaciones" del Object Page.
-     * Origen legado: fragment/Aprobadores.xml
      */
     this.on("READ", "Aprobador", async (req) => {
       const instanceID = _extraerInstanceID(req);
@@ -268,8 +217,8 @@ class PagosService extends cds.ApplicationService {
 
     /**
      * GET /nomina/aprobaciones/TareasInbox('{id}')/niveles
-     * Lanes (columnas) del mismo ProcessFlow. CAP las deriva del historial;
-     * no son una fuente de datos independiente — ver historial.service.js.
+     * Lanes (columnas) del mismo ProcessFlow, derivadas del historial
+     * (ver historial.service.js).
      */
     this.on("READ", "NivelAprobacion", async (req) => {
       const instanceID = _extraerInstanceID(req);
@@ -283,14 +232,9 @@ class PagosService extends cds.ApplicationService {
 
   static handle_aprobaciones() {
     /**
-     * Registra todos los handlers de acciones bound de TareasInbox:
-     *   apoderadoAprobar  | apoderadoRechazar
-     *   liberadorLiberar  | liberadorRechazar  | liberadorAnular
-     *   coordinadorAprobar (501) | coordinadorRechazar (501)
-     *
-     * La lógica vive en aprobacion.service.js para separación de capas.
-     * Anti-tampering: instanceID de req.params, propuesta de BPA, usuario de XSUAA.
-     * El único dato aceptado del cliente es "comentario".
+     * Registra los handlers de acciones bound de TareasInbox (la lógica vive
+     * en aprobacion.service.js). Anti-tampering: instanceID de req.params,
+     * propuesta de BPA, usuario de XSUAA; el único dato del cliente es "comentario".
      */
     aprobSvc.registrarHandlers(this);
   }
@@ -298,23 +242,12 @@ class PagosService extends cds.ApplicationService {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // FUNCIONES PRIVADAS DEL MÓDULO
-// Acceso a bpa, constSvc, cpiInfra, perfiles, LOG.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
  * Formatea el importe con la convención monetaria peruana: "S/ 43,038.69".
- * Coma para los miles, punto para los decimales y siempre dos decimales.
- *
- * Se formatea en CAP —no en la vista— por el mismo motivo que las fechas del
- * historial (historial.service.js → _formatearFecha): así el importe se lee igual
- * en la app, en un export y en cualquier consumidor futuro del mismo OData, sin
- * depender del locale del navegador. Con `@Measures.ISOCurrency` la agrupación la
- * elegiría el idioma del usuario y un navegador en es-ES mostraría "43.038,69",
- * que no es la convención de Perú.
- *
- * `importe` llega como texto desde el contexto BPA (nunca como número), así que
- * se convierte aquí. Si no es convertible se devuelve el valor original tal cual:
- * es preferible mostrar el dato crudo antes que un "S/ NaN".
+ * `importe` llega como texto desde el contexto BPA; si no es convertible se
+ * devuelve el valor original tal cual.
  *
  * @param {string} importe - importe en texto, con punto decimal ("43038.69")
  * @param {string} moneda  - código ISO de la propuesta; PEN por defecto
@@ -362,11 +295,8 @@ function _conImporteFormateado(tarea) {
 
 /**
  * Obtiene y enriquece la lista de tareas BPA con su contexto.
- *
- * Memoizado por petición igual que el detalle: el $batch que manda Fiori
- * Elements tras una acción puede pedir la colección más de una vez (el refresco
- * del SideEffects y el propio rebinding de la tabla), y cada reconstrucción
- * cuesta una llamada de lista más un readContext POR TAREA. Ver infrastructure/memo-peticion.
+ * Memoizado por petición (ver infrastructure/memo-peticion.js): el $batch de
+ * Fiori Elements puede pedir la colección más de una vez por petición.
  *
  * @param {string} usuario - Email del usuario autenticado (req.user.id)
  */
@@ -374,10 +304,7 @@ function _obtenerTareasBpa(usuario) {
   return memoPorPeticion(`tareas:${usuario}`, () => _cargarTareasBpa(usuario));
 }
 
-/**
- * Carga real de la bandeja. No llamar directamente: usar _obtenerTareasBpa.
- * Origen legado: Master.controller.js → getInboxTasks() + readContext()
- */
+/** Carga real de la bandeja. No llamar directamente: usar _obtenerTareasBpa. */
 async function _cargarTareasBpa(usuario) {
   try {
     const tareas = await bpa.getInboxTasks(usuario);
@@ -386,8 +313,6 @@ async function _cargarTareasBpa(usuario) {
     const tareasEnriquecidas = await Promise.all(
       tareas.map(tarea => _enriquecerConContexto(tarea))
     );
-    // El formato del importe se aplica en la salida —y no dentro de cada rama—
-    // para que las tareas reales y las de respaldo se muestren igual.
     return tareasEnriquecidas.map(_conImporteFormateado);
 
   } catch (error) {
@@ -414,18 +339,9 @@ function _extraerPropuesta(contexto) {
 
 /**
  * Extrae el resultado de la notificación a Payroll desde context.custom.*
- *
- * BPA notifica a Payroll (ECP vía CPI) tras cada decisión. Si Payroll rechaza,
- * un Script Task escribe el flag y el mensaje en las variables personalizadas y
- * el flujo hace loop back: la tarea reaparece en el inbox del mismo usuario.
- * Estos campos son lo que le explica al usuario por qué volvió.
- *
- * Los nombres de variable dependen del rol y viven en perfiles.js — están en
- * minúsculas porque así se escribieron en el BPMN 1.3.1.
- *
- * La búsqueda es case-insensitive a propósito: el proyecto ya sufrió un desajuste
- * de mayúsculas entre el diseño documentado y el BPMN desplegado, así que si
- * alguien normaliza los nombres en BPA esto sigue funcionando sin tocar CAP.
+ * BPA notifica a Payroll tras cada decisión; si Payroll rechaza, la tarea
+ * reaparece por loop back y estos campos explican por qué. Los nombres de
+ * variable dependen del rol (ver perfiles.js) y se buscan case-insensitive.
  *
  * @param {object} contexto    - contexto BPA completo (incluye la rama `custom`)
  * @param {string} activityId  - taskDefinitionId, determina qué par de campos leer
@@ -460,18 +376,10 @@ function _extraerNotificacion(contexto, activityId) {
 
 /**
  * Limpia el mensaje de rechazo antes de mostrarlo en el Object Page.
- *
- * El script de BPA que escribe la variable de mensaje a veces vuelca ahí el
- * resultado CRUDO del Action Task en vez del texto de negocio — por ejemplo
- * `{"result":{"n0:ZhrfApoRegResponse":{"EpMensaje":"Correo no existe: x","EpFlagError":"X"}}}`
- * en vez de solo "Correo no existe: x". Es una variación del script del BPMN,
- * no algo que CAP controle, así que en vez de mostrarle JSON crudo al usuario
- * se busca el texto legible dentro de la estructura si hace falta.
- *
- * El campo se busca por SUFIJO "epmensaje" (case-insensitive) para tolerar el
- * prefijo de namespace ("n0:") que agrega CPI, igual que _extraerDetalle en
- * cpi-client.js. Si el valor no es JSON, o no aparece ese campo, se devuelve
- * el texto tal cual — así un mensaje ya limpio nunca se altera.
+ * El script de BPA a veces vuelca ahí el resultado crudo del Action Task en
+ * vez del texto de negocio; se busca el campo "epmensaje" (por sufijo,
+ * case-insensitive) dentro del JSON si hace falta. Si no es JSON, o no
+ * aparece ese campo, se devuelve el texto tal cual.
  *
  * @param {*} bruto - valor crudo de la variable de mensaje en context.custom
  * @returns {string}
@@ -509,16 +417,8 @@ function _buscarEpMensaje(nodo, profundidad = 0) {
 }
 
 /**
- * Extrae el estado del QUÓRUM DE APODERADOS del contexto BPA.
- *
- * Desde v1.2.0 los apoderados son una lista de N usuarios equivalentes y bastan
- * dos firmas cualesquiera. La tarea es una sola, con pool de destinatarios, y
- * reaparece en el inbox de los que faltan hasta alcanzar el quórum. Sin estos
- * campos el usuario no tiene forma de saber si su firma es la primera o la que
- * cierra, ni por qué la propuesta sigue apareciéndole a un compañero.
- *
- * Se calcula SOLO para tareas de apoderado: en la del liberador no hay pool que
- * describir, y devolver "0 de 2" ahí sería ruido que la UI tendría que filtrar.
+ * Extrae el estado del quórum de apoderados del contexto BPA. Se calcula solo
+ * para tareas de apoderado (la del liberador no tiene pool que describir).
  *
  * @param {object} contexto   - contexto BPA completo (con su rama `custom`)
  * @param {object} propuesta  - PropuestaNomina ya extraída
@@ -589,6 +489,7 @@ async function _enriquecerConContexto(tarea) {
       sociedad           : propuesta.sociedad          ?? "",
       banco              : propuesta.banco             ?? "",
       bancoDescripcion   : propuesta.bancoDescripcion  ?? "",
+      grupoPersonal      : grupoPersonal(propuesta.tipoTrabajador),
       importe            : propuesta.importe           ?? "",
       moneda             : propuesta.moneda            ?? "",
       viaPago            : propuesta.viaPago           ?? "",
@@ -600,12 +501,7 @@ async function _enriquecerConContexto(tarea) {
       correoAnalista     : propuesta.correoAnalista     ?? "",
       ..._camposEstado(flagsRol, { estaTerminado, estaAnulado }),
       ...flagsRol,
-      // Resultado del intento anterior: si Payroll rechazó, la tarea reapareció
-      // por loop back y el usuario debe ver el motivo ya desde la lista.
       ..._extraerNotificacion(contexto, tarea.activityId),
-      // Estado del quórum: la tarea de apoderado también reaparece cuando falta
-      // la segunda firma, y "1 de 2 firmas" es lo que distingue ese caso de un
-      // rechazo de Payroll sin abrir el detalle.
       ..._extraerQuorum(contexto, propuesta, flagsRol),
       estaTerminado,
       estaAnulado,
@@ -619,16 +515,13 @@ async function _enriquecerConContexto(tarea) {
       instanceID         : tarea.id,
       tituloTarea        : tarea.subject ?? "",
       numeroPropuesta    : "", sociedad: "", banco: "", bancoDescripcion: "",
+      grupoPersonal      : "",
       importe            : "", moneda: "", viaPago: "", modalidadPP: "",
       version            : "", fechaPropuestaPago: null, fechaPago: null, usuarioCreacion: "",
       correoAnalista     : "",
-      // Sin contexto no hay flags de cierre, pero el rol de la tarea sí se
-      // conoce (viene del activityId), así que el estado sigue siendo el real.
       ..._camposEstado(flagsRol, { estaTerminado: false, estaAnulado: false }),
       ...flagsRol,
       notifTieneError    : false, notifMensaje: "", notifCriticidad: 0,
-      // Sin contexto no hay quórum que leer: los campos van vacíos en vez de
-      // inventar un "0 de 2" que la UI mostraría como si fuera un dato real.
       ..._extraerQuorum(null, {}, { esApoderado: false }),
       estaTerminado      : false, estaAnulado: false,
       puedeTerminarFlujo : false, puedeAnular: false,
@@ -638,10 +531,8 @@ async function _enriquecerConContexto(tarea) {
 
 /**
  * Obtiene el detalle completo de una tarea para el Object Page.
- *
- * Memoizado por petición: el Object Page lo pide una vez para la entidad y otra
- * por cada tabla de sección, y las cinco lecturas son el mismo dato. Ver
- * memo-peticion.js para el alcance y por qué no es una caché con TTL.
+ * Memoizado por petición (ver memo-peticion.js): el Object Page lo pide una
+ * vez para la entidad y otra por cada tabla de sección.
  *
  * @param {string} instanceID
  */
@@ -650,11 +541,8 @@ function _obtenerDetalleTarea(instanceID) {
 }
 
 /**
- * Carga real del detalle. No llamar directamente desde los handlers: usar
- * _obtenerDetalleTarea, que evita repetir el trabajo dentro de la misma petición.
- *
+ * Carga real del detalle. No llamar directamente: usar _obtenerDetalleTarea.
  * BPA + composiciones CPI en paralelo para minimizar latencia.
- * Origen legado: Detail.controller.js → _onBindingChange()
  */
 async function _cargarDetalleTarea(instanceID) {
   try {
@@ -672,16 +560,11 @@ async function _cargarDetalleTarea(instanceID) {
 
     const propuesta = _extraerPropuesta(contexto);
 
-    // historial.service ya resuelve internamente su propio fallback (si ECP no
-    // responde, muestra el esqueleto del flujo), por eso no lleva .catch().
+    // historial.service resuelve internamente su propio fallback (esqueleto
+    // del flujo si ECP no responde), por eso no lleva .catch().
     const [proveedores, adjuntos, historial] = await Promise.all([
       cpiInfra.getProveedores(propuesta).catch(() => []),
       cpiInfra.getAdjuntos(propuesta).catch(() => []),
-      // activityId: la misma fuente que decide los flags de rol y los botones.
-      // Se pasa para que los estados del esqueleto no puedan contradecir lo que
-      // la pantalla permite hacer (ver filasEsperadas).
-      // contexto: aporta el quórum — cuántas tarjetas tiene el nivel de
-      // apoderados y quiénes de ellos ya firmaron según BPA.
       histSvc.obtenerHistorial(propuesta, instanceID, tarea?.activityId, contexto),
     ]);
 
@@ -708,14 +591,9 @@ async function _cargarDetalleTarea(instanceID) {
 }
 
 /**
- * Normalizadores de salida.
- *
- * Un campo con valor `undefined` NO se serializa en JSON: desaparece de la
- * respuesta OData aunque el $select lo pida. En el cliente eso se ve como
- * "Failed to drill-down into (...)/campo, invalid segment: campo" y el control
- * enlazado se queda vacío. Como el contexto BPA no garantiza que la propuesta
- * traiga todos los campos del DataType, cada valor se normaliza aquí antes de
- * salir: texto vacío, 0, false o null, pero nunca `undefined`.
+ * Normalizadores de salida: un `undefined` no se serializa en JSON y deja el
+ * control enlazado vacío. Cada valor se normaliza a texto vacío, 0, false o
+ * null, nunca `undefined`.
  */
 function _texto(valor)   { return valor === null || valor === undefined ? "" : String(valor); }
 function _entero(valor)  { const n = Number(valor); return Number.isFinite(n) ? Math.trunc(n) : 0; }
@@ -739,16 +617,9 @@ function _fecha(valor) {
 }
 
 /**
- * URL de la entidad media PropuestaPDF para esta propuesta.
- *
- * La clave es la terna '<numeroPropuesta>-<sociedad>-<yyyy-MM-dd>' y NO el
- * instanceID de BPA, que es lo que se construía antes: el instanceID es un UUID
- * del workflow, no identifica el documento en SAP, y encima handle_pdf lo
- * troceaba por guiones esperando justamente esta terna — la URL nunca resolvía.
- *
- * Devuelve null si falta cualquiera de los tres campos: sin terna completa no hay
- * documento que pedir, y un urlPDF vacío hace que el botón "Ver PDF" avise en vez
- * de abrir un visor roto.
+ * URL de la entidad media PropuestaPDF para esta propuesta: la clave es la
+ * terna '<numeroPropuesta>-<sociedad>-<yyyy-MM-dd>', no el instanceID de BPA.
+ * Devuelve null si falta cualquiera de los tres campos.
  */
 function _urlPDF(propuesta) {
   const partes = [propuesta?.numeroPropuesta, propuesta?.sociedad, propuesta?.fechaPropuestaPago]
@@ -784,10 +655,7 @@ function _ensamblarDetalle({ instanceID, activityId, subject, propuesta, notific
 
   const base = {
     instanceID,
-    // El título lo pone BPA en el subject de la tarea; la propuesta solo lo
-    // trae en algunos contextos. Mismo orden de preferencia que el List Report
-    // (_enriquecerConContexto), para que la lista y el detalle no muestren
-    // títulos distintos de la misma tarea.
+    // Mismo orden de preferencia que el List Report (_enriquecerConContexto).
     tituloTarea           : _texto(subject || propuesta.tituloTarea),
     numeroPropuesta       : _texto(propuesta.numeroPropuesta),
     sociedad              : _texto(propuesta.sociedad),
@@ -809,23 +677,16 @@ function _ensamblarDetalle({ instanceID, activityId, subject, propuesta, notific
     indicadorPagoAdelanto : _texto(propuesta.indicadorPagoAdelanto),
     tipoNomina            : _texto(propuesta.tipoNomina),
     tipoTrabajador        : _texto(propuesta.tipoTrabajador),
+    grupoPersonal         : grupoPersonal(propuesta.tipoTrabajador),
     subdivision           : _texto(propuesta.subdivision),
     estadoPP              : estado.texto,
     estadoCriticidad      : estado.criticidad,
     urlPDF                : _urlPDF(propuesta),
     contadorFirma         : _entero(propuesta.contadorFirma),
     cantidad              : _entero(propuesta.cantidad),
-    // Lista, no un correo suelto: Payroll puede designar varios liberadores en
-    // este campo y BPA reparte esa lista como destinatarios de la tarea. Se
-    // normaliza igual que las de apoderados —minúsculas, sin duplicados,
-    // separadas por ", "— para que un CSV crudo no llegue a la UI tal cual.
     usuarioLiberador      : perfiles.normalizarUsuarios(propuesta.usuarioLiberador).join(", "),
     usuarioCoordinador    : _texto(propuesta.usuarioCoordinador),
     usuarioCaja           : _texto(propuesta.usuarioCaja),
-    // usuarioApoderado, usuariosRevisores y usuariosSupervisores se mapeaban
-    // aquí sin existir en TareasInbox: los dos primeros salieron del DataType
-    // de BPA hace versiones y el tercero nunca llegó a la entidad. Se retiran
-    // en vez de arrastrar campos que ningún consumidor puede leer.
   };
 
   return {
@@ -845,38 +706,21 @@ function _ensamblarDetalle({ instanceID, activityId, subject, propuesta, notific
 
 /**
  * Deriva texto + criticidad de "Estado" a partir del rol pendiente (activityId)
- * y los flags de cierre del flujo. No existe un campo "estadoPP" en el
- * contexto BPA (PropuestaNomina) — era un campo de la arquitectura HANA
- * anterior que nunca se migró — así que se calcula en vivo con lo único
- * que BPA sí entrega: quién tiene la tarea pendiente y si el flujo cerró.
- *
- * Aquí vive el ORDEN de precedencia; los textos y los colores viven en
- * config/estados.js, que es la misma tabla que alimenta el desplegable del
- * filtro "Estado". Separarlos evita que la lista de valores y la columna se
- * desincronicen — la comparación del $filter es sobre el texto.
+ * y los flags de cierre del flujo (no existe un campo "estadoPP" en el
+ * contexto BPA). El orden de precedencia vive aquí; los textos y colores en
+ * config/estados.js.
  */
 function _calcularEstado(flagsRol, flagsEstado) {
   const E = estados.ESTADOS;
   if (flagsEstado.estaAnulado)   return E.ANULADO;
   if (flagsEstado.estaTerminado) return E.LIBERADO;
   if (flagsRol.esLiberador)      return E.LIBERACION;
-  // Un único estado para los apoderados: con el pool del quórum ya no hay un
-  // "Apoderado 1" y un "Apoderado 2" que separar — la tarea es la misma para
-  // todos y el orden de firma lo decide quién llegue primero.
   if (flagsRol.esApoderado)      return E.APODERADOS;
   if (flagsRol.esCoordinador)    return E.COORDINADOR;
   return E.PENDIENTE;
 }
 
-/**
- * Los dos campos de estado listos para mezclar en una fila del List Report.
- *
- * El List Report los necesita en la COLECCIÓN, no solo en el detalle: la
- * columna "Estado" y su filtro se resuelven sobre lo que devuelve
- * GET /TareasInbox. Mientras estadoPP solo se calculaba en _ensamblarDetalle,
- * las filas de la lista llegaban sin él y un $filter sobre estadoPP no
- * encontraba nada, porque comparaba contra un campo vacío.
- */
+/** Los dos campos de estado listos para mezclar en una fila del List Report. */
 function _camposEstado(flagsRol, flagsEstado) {
   const estado = _calcularEstado(flagsRol, flagsEstado);
   return { estadoPP: estado.texto, estadoCriticidad: estado.criticidad };
@@ -921,13 +765,11 @@ function _getMockTareas() {
       version: "0001", importe: "8500.00", moneda: "PEN",
       usuarioCreacion: "arodas@centria.net",
       estaTerminado: false, estaAnulado: false,
-      // Simula una tarea devuelta por el loop back de BPA: Payroll rechazó el
-      // intento anterior. Reproduce el formato real de EpMensaje observado en QAS.
+      // Simula una tarea devuelta por loop back de BPA tras un rechazo de Payroll.
       notifTieneError: true,
       notifMensaje   : "Correo no existe: usuario.prueba@ejemplo.com",
       notifCriticidad: 1,
-      // Quórum sin arrancar: nadie ha firmado todavía, los cuatro apoderados
-      // de la lista siguen pendientes.
+      // Quórum sin arrancar: nadie ha firmado todavía.
       quorum: {
         usuarios : ["jlicetti@centria.net", "lqcastro@centria.net",
                     "arodas@centria.net", "cpanduro@centria.net"],
@@ -943,9 +785,8 @@ function _getMockTareas() {
       version: "0001", importe: "12300.00", moneda: "PEN",
       usuarioCreacion: "arodas@centria.net",
       estaTerminado: false, estaAnulado: false,
-      // El caso que solo existe desde v1.2.0: la tarea reapareció en el inbox
-      // no por un rechazo de Payroll, sino porque falta la segunda firma. Sin
-      // el texto del quórum las dos situaciones son indistinguibles en pantalla.
+      // Caso: la tarea reapareció porque falta la segunda firma, no por un
+      // rechazo de Payroll.
       quorum: {
         usuarios : ["jlicetti@centria.net", "lqcastro@centria.net",
                     "arodas@centria.net"],
@@ -961,12 +802,11 @@ function _getMockTareas() {
       notifTieneError   : false,
       notifMensaje      : "",
       notifCriticidad   : 0,
+      grupoPersonal     : grupoPersonal("E"),
       ...tarea,
       ...flagsRol,
       ..._camposEstado(flagsRol, tarea),
-      // El quórum se arma con la MISMA función que los datos reales, alimentada
-      // con un contexto BPA simulado: así el mock ejercita la normalización de
-      // perfiles.js en vez de esquivarla escribiendo los textos a mano.
+      // Misma función que los datos reales, con un contexto BPA simulado.
       ..._extraerQuorum(
         _contextoQuorumMock(quorum),
         { usuariosApoderados: (quorum?.usuarios ?? []).join(",") },
@@ -977,11 +817,7 @@ function _getMockTareas() {
   });
 }
 
-/**
- * Contexto BPA simulado con la rama `custom` del quórum, tal como la escriben
- * los scripts `inicializarApoderados` y `Registrar firma` — nombres de variable
- * en minúsculas incluidos, que es como BPA las expone de verdad.
- */
+/** Contexto BPA simulado con la rama `custom` del quórum (nombres en minúsculas, como BPA los expone). */
 function _contextoQuorumMock(quorum) {
   if (!quorum) return null;
   const firmantes  = quorum.firmantes ?? [];
@@ -1001,27 +837,20 @@ function _contextoQuorumMock(quorum) {
  * Mock de detalle completo para el Object Page cuando BPA no está disponible.
  */
 function _getMockDetalle(instanceID) {
-  // Rol simulado para pruebas locales; cambiarlo aquí cambia a la vez los botones
-  // visibles y los estados del historial, que es justo lo que evita que el
-  // diagrama muestre un apoderado pendiente junto a los botones de Liberación.
+  // Rol simulado; cambiarlo cambia a la vez los botones visibles y los
+  // estados del historial.
   const ACTIVITY_ID_SIMULADO = "form_aprobacionLiberadorFinal_1";
 
-  // Propuesta simulada: la lista de apoderados va como CSV, igual que la
-  // entrega Payroll desde el DataType 1.4.0.
+  // Lista de apoderados como CSV, igual que la entrega Payroll.
   const PROPUESTA_SIMULADA = {
     usuariosApoderados: "jlicetti@centria.net,lqcastro@centria.net,arodas@centria.net",
     usuarioLiberador  : "bmendoza@centria.net",
     analista          : "MRICANQUI",
   };
 
-  // Sin BPA no hay a quién preguntar por las firmas, así que el diagrama del
-  // mock es solo el esqueleto: los slots de apoderado salen aprobados —la tarea
-  // viva es la del liberador— pero SIN firmante, porque quién firmó lo dice ECP
-  // y aquí no se le ha preguntado. El aviso de historialEsDemo lo explica.
   const FIRMAS_REQUERIDAS = 2;
 
-  // El historial pasa por el MISMO constructor que usarán los datos de ECP:
-  // así el mock ejercita la normalización real en vez de esquivarla.
+  // Mismo constructor que usarán los datos reales de ECP.
   const historial = histSvc.construirDesdeFilas(
     histSvc.filasEsperadas(PROPUESTA_SIMULADA, ACTIVITY_ID_SIMULADO, FIRMAS_REQUERIDAS),
     instanceID);
@@ -1035,6 +864,8 @@ function _getMockDetalle(instanceID) {
     fechaPago             : "2026-05-20",
     banco                 : "BCP",
     bancoDescripcion      : "001 - BCP Soles",
+    tipoTrabajador        : "E",
+    grupoPersonal         : grupoPersonal("E"),
     viaPago               : "N",
     modalidadPP           : "H2H",
     version               : "0001",
@@ -1087,18 +918,10 @@ function _getMockDetalle(instanceID) {
 }
 
 /**
- * PDF PRELIMINAR de la propuesta.
- *
- * Provisional: sustituye al documento real mientras el iFlow de CPI que lo
- * entrega no esté disponible (ver el aviso en handle_pdf). Muestra la terna que
- * identifica a la propuesta y se declara preliminar de forma inequívoca —marca
- * de agua y aviso al pie— para que nadie firme creyendo que está viendo el
- * detalle real del lote de pago.
- *
- * Se escribe a mano en lugar de usar pdfkit a propósito: pdfkit NO está en las
- * dependencias del proyecto (utils.js lo requiere y por eso también falla), y no
- * vale la pena sumar una dependencia para un artefacto que se va a borrar en
- * cuanto el iFlow entregue el PDF verdadero.
+ * PDF preliminar de la propuesta: sustituye al documento real mientras el
+ * iFlow de CPI no esté disponible. Muestra la terna que identifica la
+ * propuesta y se declara preliminar (marca de agua y aviso al pie). Se
+ * escribe a mano en vez de con pdfkit, que no está en las dependencias.
  */
 function _construirPDFPreliminar({ id, numeroPropuesta, sociedad, fechaPropuestaPago }) {
   const filas = [
@@ -1127,12 +950,9 @@ function _construirPDFPreliminar({ id, numeroPropuesta, sociedad, fechaPropuesta
 }
 
 /**
- * yyyy-MM-dd → dd/MM/yyyy, la convención con la que se leen las fechas aquí.
- *
- * Se parte la cadena en vez de construir un Date a propósito: una fecha SIN hora
- * la interpreta JavaScript como UTC, y al presentarla en hora de Perú (-05:00)
- * retrocedería al día anterior. Aquí no hay hora que ajustar —es una fecha de
- * calendario, no un instante—, así que no hay nada que convertir.
+ * yyyy-MM-dd → dd/MM/yyyy. Se parte la cadena en vez de construir un Date:
+ * una fecha sin hora la interpreta JS como UTC y retrocedería un día al
+ * presentarla en hora de Perú.
  */
 function _fechaDdMmAaaa(iso) {
   const partes = String(iso ?? "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -1204,14 +1024,7 @@ function _flujoPaginaPreliminar(filas) {
   return ops.join("\n");
 }
 
-/**
- * Envuelve los objetos en un PDF válido con su tabla xref.
- *
- * Los offsets se calculan sobre los bytes ya escritos: escribirlos a mano
- * —como hacía el mock anterior, con posiciones fijas que no correspondían a
- * nada— produce un archivo que solo abre gracias a que los visores reconstruyen
- * la tabla por su cuenta.
- */
+/** Envuelve los objetos en un PDF válido con su tabla xref, calculando los offsets reales. */
 function _ensamblarPDF(objetos) {
   let pdf = "%PDF-1.4\n";
   const offsets = [];

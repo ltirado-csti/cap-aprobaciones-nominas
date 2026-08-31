@@ -1,9 +1,11 @@
 /**
  * Hoja de estilos de la app: solo lo que no se resuelve con clases estándar
- * de UI5. No se estilan controles ajenos por su clase interna
- * (.sapSuiteUiCommons*, .sapMList*, …), que es detalle de implementación de
- * la librería; todo se aplica vía una clase propia que el control recibe por
- * `class` en el fragmento.
+ * de UI5. Gemela de la de ui5-aprobaciones (bundles separados, sin módulo
+ * compartido), con los mismos nombres de clase a propósito.
+ *
+ * No se estilan controles ajenos por su clase interna (.sapSuiteUiCommons*,
+ * .sapMList*, …), que es detalle de implementación de la librería; todo se
+ * aplica vía una clase propia que el control recibe por `class` en el fragmento.
  */
 
 /* Centra el diagrama del ProcessFlow con márgenes automáticos, no con
